@@ -1,0 +1,1 @@
+set GOPATH=%~dp0

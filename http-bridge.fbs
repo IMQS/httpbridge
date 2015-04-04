@@ -1,0 +1,46 @@
+namespace httpbridge;
+
+// Header frames always contain the entire header. They may also contain body data.
+// Body frames only contain body data, as well as 'channel' and 'stream'.
+enum TxFrameType : byte {
+	Header = 0,
+	Body
+}
+
+enum TxHttpVersion : byte {
+	Http10 = 0,
+	Http11,
+	Http2
+}
+
+// Header lines work as follows:
+// If id is null, then key and value are simply that.
+// If id is not null, then you are either storing a new pair, or retrieving
+// an existing pair. If key&value are not empty, then you are storing a new
+// pair. If key&value are empty, then you are retrieving that existing pair.
+// In the case where you are storing a new pair, that new pair is also one
+// of the headers of the current request.
+table TxHeaderLine {
+	key:			[ubyte];
+	value:			[ubyte];
+	id:				ushort;
+}
+
+table TxFrame {
+	frametype:			TxFrameType = Header;
+	version:			TxHttpVersion = Http10;
+	channel:			ulong;						// A TCP connection
+	stream:				ulong;						// An HTTP/2 stream
+				
+	// The first header line is special:			
+	// Request example:		GET /the/path?a=b
+	// Response example:	200 [value is not used]
+	// The remaining header lines are the proper HTTP headers
+	headers:			[TxHeaderLine];
+
+	body_total_length:	ulong;						// Length of entire request's body (aka Content-Length)
+	body_offset:		ulong;						// Offset into the body of the entire request, where 'body' starts
+	body:				[ubyte];					// A portion of the body (or perhaps the entire thing, if short enough)
+}
+
+root_type TxFrame;
