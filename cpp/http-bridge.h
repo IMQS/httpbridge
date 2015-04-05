@@ -53,6 +53,7 @@ t2-output\win64-2013-debug-default\flatc -g -o third_party\http-bridge\goserver\
 #include <vector>
 #include <unordered_map>
 #include <thread>
+#include <string.h>
 
 namespace flatbuffers
 {
@@ -67,7 +68,11 @@ namespace httpbridge
 #define HTTPBRIDGE_PRINTF_FORMAT_Z
 #endif
 
+#ifdef _MSC_VER
 #define HTTPBRIDGE_PANIC() (*((int*)0) = 0)
+#else
+#define HTTPBRIDGE_PANIC() __builtin_trap()
+#endif
 
 #ifdef _WIN32
 #define HTTPBRIDGE_PLATFORM_WINDOWS 1
@@ -260,7 +265,7 @@ namespace httpbridge
 		void				ResendWhenBodyIsDone(Request& request);	// Called by Request.ResendWhenBodyIsDone(). Panics if Request.IsEntireBodyInsideHeader() is false, or not a HEADER frame.
 
 	private:
-		HeaderCacheRecv*	HeaderCacheRecv = nullptr;
+		httpbridge::HeaderCacheRecv* HeaderCacheRecv = nullptr;
 		ITransport*			Transport = nullptr;
 		Logger				NullLog;
 		uint8_t*			RecvBuf = nullptr;
@@ -315,7 +320,7 @@ namespace httpbridge
 		// Set a piece of the body. The Request object now owns body, and will Free() it in the destructor
 		void					InitBody(Backend* backend, HttpVersion version, uint64_t channel, uint64_t stream, uint64_t bodyTotalLength, uint64_t bodyOffset, uint64_t bodyBytes, const void* body);
 
-		Backend*				Backend() const		{ return _Backend; }
+		httpbridge::Backend*				Backend() const		{ return _Backend; }
 		bool					IsHeader() const	{ return _IsHeader; }		// If not header, then only body
 		uint64_t				Channel() const		{ return _Channel; }
 		uint64_t				Stream() const		{ return _Stream; }
@@ -435,8 +440,8 @@ namespace httpbridge
 		flatbuffers::FlatBufferBuilder*		FBB = nullptr;
 		ByteVectorOffset					BodyOffset = 0;
 		uint32_t							BodyLength = 0;
-		Vector<uint32_t>				HeaderIndex;
-		Vector<char>					HeaderBuf;
+		Vector<uint32_t>					HeaderIndex;
+		Vector<char>						HeaderBuf;
 
 		void CreateBuilder();
 	};

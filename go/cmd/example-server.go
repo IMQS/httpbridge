@@ -7,6 +7,8 @@ import (
 
 func main() {
 	server := httpbridge.Server{}
+	server.HttpPort = ":8080"
+	server.BackendPort = ":8081"
 	err := server.ListenAndServe()
 	if err != nil {
 		fmt.Printf("Error: %v\n", err)

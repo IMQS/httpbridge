@@ -1,9 +1,9 @@
 Build {
 	Units = function ()
-		local exampleclient = Program {
-			Name = "exampleclient",
+		local example_backend = Program {
+			Name = "example-backend",
 			Sources = {
-				"cpp/example-client.cpp",
+				"cpp/example-backend.cpp",
 				"cpp/http-bridge.cpp",
 			},
 			Includes = {
@@ -11,18 +11,20 @@ Build {
 			},
 			Libs = {
 				{ "Ws2_32.lib"; Config = "win*" },
+				{ "stdc++"; Config = {"*-gcc-*", "*-clang-*"} },
 			},
 		}
 
-		Default(exampleclient)
+		Default(example_backend)
 	end,
 
 	Env = {
 		CXXOPTS = {
-			"/W3",
 			--"/analyze",
+			{ "/W3"; Config = "win*" },
 			{ "/EHsc"; Config = "win*" },
 			{ "/O2"; Config = "*-vs2013-release" },
+			{ "-std=c++11"; Config = {"*-gcc-*", "*-clang-*"} },
 		},
 		GENERATE_PDB = {
 			{ "0"; Config = "*-vs2013-release" },

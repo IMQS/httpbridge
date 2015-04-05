@@ -7,7 +7,12 @@
 #ifdef HTTPBRIDGE_PLATFORM_WINDOWS
 #include <Ws2tcpip.h>
 #else
-#include <socket.h>
+#include <sys/socket.h>
+#include <sys/types.h>
+#include <netdb.h>
+#include <stdarg.h>
+#include <unistd.h>
+#include <fcntl.h> // TODO Get rid of this at 1.0 if we no longer set sockets to non-blocking
 #endif
 
 namespace httpbridge
@@ -230,6 +235,7 @@ namespace httpbridge
 	public:
 #ifdef HTTPBRIDGE_PLATFORM_WINDOWS
 		typedef SOCKET socket_t;
+		typedef DWORD setsockopt_t;
 		static const uint32_t	Infinite = INFINITE;
 		static const socket_t	InvalidSocket = INVALID_SOCKET;
 		static const int		ErrWOULDBLOCK = WSAEWOULDBLOCK;
@@ -238,6 +244,7 @@ namespace httpbridge
 		static const int		ErrSOCKET_ERROR = SOCKET_ERROR;
 #else
 		typedef int socket_t;
+		typedef int setsockopt_t;
 		static const uint32_t	Infinite			= 0xFFFFFFFF;
 		static const socket_t	InvalidSocket		= (socket_t)(~0);
 		static const int		ErrWOULDBLOCK		= EWOULDBLOCK;
@@ -307,7 +314,7 @@ namespace httpbridge
 			if (it->ai_family == AF_INET6)
 			{
 				// allow IPv4 on this IPv6 socket
-				DWORD only6 = 0;
+				setsockopt_t only6 = 0;
 				if (setsockopt(Socket, IPPROTO_IPV6, IPV6_V6ONLY, (const char*) &only6, sizeof(only6)))
 				{
 					Close();
@@ -1079,7 +1086,7 @@ namespace httpbridge
 		
 		// Hack the FBB to write our frame size at the start of the buffer
 		// Right here 'len' contains the size of the flatbuffer, which is our "frame size"
-		byte frame_size[4];
+		uint8_t frame_size[4];
 		Write32LE(frame_size, (uint32_t) len);
 		FBB->PushBytes(frame_size, 4);
 		len = FBB->GetSize();

@@ -1,5 +1,4 @@
 #include "http-bridge.h"
-#include <windows.h>
 #include <stdio.h>
 
 int main(int argc, char** argv)
@@ -12,7 +11,7 @@ int main(int argc, char** argv)
 	{
 		if (!backend.IsConnected())
 		{
-			if (backend.Connect("tcp", "localhost:81"))
+			if (backend.Connect("tcp", "localhost:8081"))
 			{
 				printf("Connected\n");
 			}
