@@ -1,3 +1,6 @@
 .tundra2.*
 t2-output/*
 example-backend
+example-backend.exe
+example-backend.obj
+http-bridge.obj
