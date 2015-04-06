@@ -26,7 +26,7 @@ namespace hb
 		fprintf(stderr, "httpbridge panic %s:%d: %s\n", file, line, msg);
 	}
 
-	HTTPBRIDGE_NORETURN_PREFIX void BuiltinTrap() HTTPBRIDGE_NORETURN_SUFFIX
+	HTTPBRIDGE_NORETURN_PREFIX void BuiltinTrap()
 	{
 #ifdef _MSC_VER
 		__debugbreak();
