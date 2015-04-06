@@ -3,9 +3,9 @@
 
 int main(int argc, char** argv)
 {
-	httpbridge::Startup();
+	hb::Startup();
 
-	httpbridge::Backend backend;
+	hb::Backend backend;
 
 	for (;;)
 	{
@@ -18,13 +18,13 @@ int main(int argc, char** argv)
 			else
 			{
 				printf("Unable to connect\n");
-				httpbridge::SleepNano(1000 * 1000 * 1000);
+				hb::SleepNano(1000 * 1000 * 1000);
 			}
 		}
 
-		httpbridge::Request request;
-		httpbridge::RecvResult res = backend.Recv(request);
-		if (res == httpbridge::RecvResult_Data)
+		hb::Request request;
+		hb::RecvResult res = backend.Recv(request);
+		if (res == hb::RecvResult_Data)
 		{
 			if (request.IsHeader())
 			{
@@ -35,16 +35,16 @@ int main(int argc, char** argv)
 				else
 				{
 					printf("-----------------------------\n");
-					printf("%d %d %s %s %s\n", (int) request.Channel(), (int) request.Stream(), request.Method(), request.URI(), httpbridge::VersionString(request.Version()));
+					printf("%d %d %s %s %s\n", (int) request.Channel(), (int) request.Stream(), request.Method(), request.URI(), hb::VersionString(request.Version()));
 					for (int i = 0; i < request.HeaderCount(); i++)
 					{
 						const char *key, *val;
 						request.HeaderAt(i, key, val);
 						printf("  %-16s = %s\n", key, val);
 					}
-					httpbridge::Response response;
+					hb::Response response;
 					response.Init(request);
-					response.Status = httpbridge::Status200_OK;
+					response.Status = hb::Status200_OK;
 					//response.WriteHeader("Content-Length", "5");
 					response.SetBody(5, "hello");
 					backend.Send(response);
@@ -59,7 +59,7 @@ int main(int argc, char** argv)
 		}
 	}
 
-	httpbridge::Shutdown();
+	hb::Shutdown();
 
 	return 0;
 }

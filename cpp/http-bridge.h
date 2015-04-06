@@ -50,10 +50,10 @@ t2-output\win64-2013-debug-default\flatc -g -o third_party\http-bridge\goserver\
 */
 
 #include <stdint.h>
+#include <string.h>
 #include <vector>
 #include <unordered_map>
 #include <thread>
-#include <string.h>
 
 namespace flatbuffers
 {
@@ -62,6 +62,13 @@ namespace flatbuffers
 
 namespace httpbridge
 {
+	// Flatbuffer classes
+	struct TxFrame;
+	struct TxFrameBuilder;
+}
+
+namespace hb
+{
 #ifdef _Printf_format_string_
 #define HTTPBRIDGE_PRINTF_FORMAT_Z _In_z_ _Printf_format_string_
 #else
@@ -69,10 +76,19 @@ namespace httpbridge
 #endif
 
 #ifdef _MSC_VER
-#define HTTPBRIDGE_PANIC() (*((int*)0) = 0)
+#define HTTPBRIDGE_NORETURN_PREFIX __declspec(noreturn)
+#define HTTPBRIDGE_NORETURN_SUFFIX
 #else
-#define HTTPBRIDGE_PANIC() __builtin_trap()
+#define HTTPBRIDGE_NORETURN_PREFIX
+#define HTTPBRIDGE_NORETURN_SUFFIX __attribute__((noreturn))
 #endif
+
+								void		PanicMsg(const char* file, int line, const char* msg);
+HTTPBRIDGE_NORETURN_PREFIX		void		BuiltinTrap() HTTPBRIDGE_NORETURN_SUFFIX;
+
+// HTTPBRIDGE_ASSERT is compiled in all builds (not just debug)
+#define HTTPBRIDGE_ASSERT(c)			(void) ((c) || (hb::PanicMsg(__FILE__,__LINE__,#c), hb::BuiltinTrap(), 0) )
+#define HTTPBRIDGE_PANIC(msg)			(void) ((hb::PanicMsg(__FILE__,__LINE__,msg), hb::BuiltinTrap(), 0) )
 
 #ifdef _WIN32
 #define HTTPBRIDGE_PLATFORM_WINDOWS 1
@@ -83,12 +99,7 @@ namespace httpbridge
 	class Logger;
 	class Request;
 	class Response;
-	//class BodyReader;
 	class HeaderCacheRecv;		// Implemented in http-bridge.cpp
-
-	// Flatbuffer classes
-	struct TxFrame;
-	struct TxFrameBuilder;
 
 	enum SendResult
 	{
@@ -144,7 +155,7 @@ namespace httpbridge
 
 #ifdef _MSC_VER
 #pragma warning(push)
-#pragma warning(disable: 28182 6308 6001)	// /analyze doesn't understand that HTTPBRIDGE_PANIC will abort
+#pragma warning(disable: 28182 6308 6001)	// /analyze doesn't understand that HTTPBRIDGE_ASSERT checks for realloc failure
 #endif
 
 	// Vector with 32-bit size and capacity. Type T must be relocatable,
@@ -187,8 +198,7 @@ namespace httpbridge
 					Items[i].T::~T();
 				
 				Items = (T*) realloc(Items, newSize * sizeof(T));
-				if (Items == nullptr)
-					HTTPBRIDGE_PANIC();
+				HTTPBRIDGE_ASSERT(Items != nullptr);
 				
 				// initialize new items
 				for (INT i = Capacity; i < newSize; i++)
@@ -210,8 +220,7 @@ namespace httpbridge
 		{
 			INT newCap = Capacity == 0 ? 1 : Capacity * 2;
 			Items = (T*) realloc(Items, newCap * sizeof(T));
-			if (Items == nullptr)
-				HTTPBRIDGE_PANIC();
+			HTTPBRIDGE_ASSERT(Items != nullptr);
 			for (INT i = Capacity; i < newCap; i++)
 				new(&Items[i]) T();
 			Capacity = newCap;
@@ -232,18 +241,17 @@ namespace httpbridge
 namespace std
 {
 	template <>
-	class hash<httpbridge::StreamKey>
+	class hash<hb::StreamKey>
 	{
 	public:
-		size_t operator()(const httpbridge::StreamKey& k) const
+		size_t operator()(const hb::StreamKey& k) const
 		{
-			return httpbridge::Hash16B((uint64_t*) &k);
+			return hb::Hash16B((uint64_t*) &k);
 		}
 	};
 }
-namespace httpbridge
+namespace hb
 {
-	//typedef std::unordered_map<StreamKey, BodyReader*> StreamToReaderMap;
 	typedef std::unordered_map<StreamKey, Request*> StreamToRequestMap;
 
 	/* A backend that wants to receive HTTP/2 requests
@@ -265,23 +273,22 @@ namespace httpbridge
 		void				ResendWhenBodyIsDone(Request& request);	// Called by Request.ResendWhenBodyIsDone(). Panics if Request.IsEntireBodyInsideHeader() is false, or not a HEADER frame.
 
 	private:
-		httpbridge::HeaderCacheRecv* HeaderCacheRecv = nullptr;
+		hb::HeaderCacheRecv* HeaderCacheRecv = nullptr;
 		ITransport*			Transport = nullptr;
 		Logger				NullLog;
 		uint8_t*			RecvBuf = nullptr;
 		size_t				RecvBufCapacity = 0;
 		size_t				RecvSize = 0;
 		std::thread::id		ThreadId;
-		//StreamToReaderMap	StreamToReader;
-		StreamToRequestMap	WaitingRequests;	// Requests waiting to have all of their body transferred
-		size_t				WaitingBufferTotal = 0;
+		StreamToRequestMap	WaitingRequests;		// Requests waiting to have all of their body transferred
+		size_t				WaitingBufferTotal = 0;	// Total number of body bytes allocated for "WaitingRequests"
 
 		RecvResult			RecvInternal(Request& request);
 		Logger*				AnyLog();
 		bool				Connect(ITransport* transport, const char* addr);
-		void				UnpackHeader(const TxFrame* frame, Request& request);
-		void				UnpackBody(const TxFrame* frame, Request& request);
-		size_t				TotalHeaderBlockSize(const TxFrame* frame);
+		void				UnpackHeader(const httpbridge::TxFrame* frame, Request& request);
+		void				UnpackBody(const httpbridge::TxFrame* frame, Request& request);
+		size_t				TotalHeaderBlockSize(const httpbridge::TxFrame* frame);
 		void				LogAndPanic(const char* msg);
 		void				SendResponse(const Request& request, StatusCode status);
 		void				CloseWaiting(StreamKey key);
@@ -320,7 +327,7 @@ namespace httpbridge
 		// Set a piece of the body. The Request object now owns body, and will Free() it in the destructor
 		void					InitBody(Backend* backend, HttpVersion version, uint64_t channel, uint64_t stream, uint64_t bodyTotalLength, uint64_t bodyOffset, uint64_t bodyBytes, const void* body);
 
-		httpbridge::Backend*				Backend() const		{ return _Backend; }
+		hb::Backend*			Backend() const		{ return _Backend; }
 		bool					IsHeader() const	{ return _IsHeader; }		// If not header, then only body
 		uint64_t				Channel() const		{ return _Channel; }
 		uint64_t				Stream() const		{ return _Stream; }
@@ -381,8 +388,8 @@ namespace httpbridge
 
 	private:
 		static const int		NumPseudoHeaderLines = 1;
-		httpbridge::Backend*	_Backend = nullptr;
-		//httpbridge::BodyReader*	_BodyReader = nullptr;
+		hb::Backend*			_Backend = nullptr;
+		//hb::BodyReader*		_BodyReader = nullptr;
 		bool					_IsHeader = false;			// else Body
 		HttpVersion				_Version = HttpVersion10;
 		uint64_t				_Channel = 0;
@@ -394,24 +401,6 @@ namespace httpbridge
 		uint64_t				_FrameBodyLength = 0;
 		uint64_t				_BodyLength = 0;
 	};
-
-#ifdef HTTPBRIDGE_A_BAD_IDEA
-	/* Request body reader.
-	This makes it easy to stream the body in, if you're happy to have your worker threads block.
-	*/
-	class BodyReader
-	{
-	public:
-		BodyReader(const Request& request);
-
-		// Called by Backend when a new frame arrives for this request. BodyReader steals the data from bodyFrame and leave the
-		// caller with an empty bodyFrame upon return.
-		void Send(Request& bodyFrame);
-	
-	private:
-		Vector<byte*> FrameQueue;	// Frames that have arrived, and have not yet been read
-	};
-#endif
 
 	/* HTTP Response
 	*/
@@ -436,7 +425,6 @@ namespace httpbridge
 		void Finish(size_t& len, void*& buf);
 
 	private:
-		//TxFrameBuilder*					Frame = nullptr;
 		flatbuffers::FlatBufferBuilder*		FBB = nullptr;
 		ByteVectorOffset					BodyOffset = 0;
 		uint32_t							BodyLength = 0;
@@ -449,9 +437,9 @@ namespace httpbridge
 
 namespace std
 {
-	inline void swap(httpbridge::Request& a, httpbridge::Request& b)
+	inline void swap(hb::Request& a, hb::Request& b)
 	{
-		httpbridge::Request tmp;
+		hb::Request tmp;
 		memcpy(&tmp, &a, sizeof(tmp));
 		memcpy(&a, &b, sizeof(tmp));
 		memcpy(&b, &tmp, sizeof(tmp));

@@ -20,15 +20,15 @@ Build {
 
 	Env = {
 		CXXOPTS = {
-			--"/analyze",
 			{ "/W3"; Config = "win*" },
 			{ "/EHsc"; Config = "win*" },
-			{ "/O2"; Config = "*-vs2013-release" },
+			{ "/O2"; Config = "*-msvc-release" },
+			{ "/analyze"; Config = "*-msvc-release" },
 			{ "-std=c++11"; Config = {"*-gcc-*", "*-clang-*"} },
 		},
 		GENERATE_PDB = {
-			{ "0"; Config = "*-vs2013-release" },
-			{ "1"; Config = { "*-vs2013-debug", "*-vs2013-production" } },
+			{ "0"; Config = "*-msvc-release" },
+			{ "1"; Config = { "*-msvc-debug", "*-msvc-production" } },
 		},
 	},
 
@@ -64,8 +64,8 @@ Build {
 		Msvc = {
 			-- Remap config names to MSVC platform names (affects things like header scanning & debugging)
 			PlatformMappings = {
-				['win64-vs2013'] = 'x64',
-				['win32-vs2013'] = 'Win32',
+				['win64-msvc'] = 'x64',
+				['win32-msvc'] = 'Win32',
 			},
 			-- Remap variant names to MSVC friendly names
 			VariantMappings = {
@@ -73,6 +73,10 @@ Build {
 				['debug']      = 'Debug',
 				['production'] = 'Production',
 			},
+		},
+		-- Override solutions to generate and what units to put where.
+		MsvcSolutions = {
+			['httpbridge.sln'] = {},          -- receives all the units due to empty set
 		},
 
 		-- Override output directory for sln/vcxproj files.

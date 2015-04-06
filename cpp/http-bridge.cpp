@@ -15,11 +15,25 @@
 #include <fcntl.h> // TODO Get rid of this at 1.0 if we no longer set sockets to non-blocking
 #endif
 
-namespace httpbridge
+namespace hb
 {
 	//////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 	//////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 	//////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+	void PanicMsg(const char* file, int line, const char* msg)
+	{
+		fprintf(stderr, "httpbridge panic %s:%d: %s\n", file, line, msg);
+	}
+
+	HTTPBRIDGE_NORETURN_PREFIX void BuiltinTrap() HTTPBRIDGE_NORETURN_SUFFIX
+	{
+#ifdef _MSC_VER
+		__debugbreak();
+#else
+		__builtin_trap();
+#endif
+	}
 
 	bool Startup()
 	{
@@ -88,9 +102,6 @@ namespace httpbridge
 				break;
 			v = new_v;
 		}
-		// fixup for all cases where v != 0. ie chop off the last '0', eg remove the '0' from "0123", which here will be "3210".
-		//if (i != 0)
-		//	i--;
 		buf[i] = 0;
 		i--;
 		for (int j = 0; j < i; j++, i--)
@@ -143,7 +154,7 @@ namespace httpbridge
 			if (logger != nullptr)
 				logger->Log("httpbridge: Out of memory, about to panic");
 			if (panicOnFail)
-				HTTPBRIDGE_PANIC();
+				HTTPBRIDGE_PANIC("Out of memory (alloc)");
 		}
 		return b;
 	}
@@ -156,7 +167,7 @@ namespace httpbridge
 			if (logger != nullptr)
 				logger->Log("httpbridge: Out of memory, about to panic");
 			if (panicOnFail)
-				HTTPBRIDGE_PANIC();
+				HTTPBRIDGE_PANIC("Out of memory (realloc)");
 			return buf;
 		}
 		return newBuf;
@@ -167,7 +178,7 @@ namespace httpbridge
 		free(buf);
 	}
 
-	httpbridge::HttpVersion TranslateVersion(httpbridge::TxHttpVersion v)
+	hb::HttpVersion TranslateVersion(httpbridge::TxHttpVersion v)
 	{
 		switch (v)
 		{
@@ -175,11 +186,11 @@ namespace httpbridge
 		case httpbridge::TxHttpVersion_Http11: return HttpVersion11;
 		case httpbridge::TxHttpVersion_Http2: return HttpVersion2;
 		}
-		HTTPBRIDGE_PANIC();
+		HTTPBRIDGE_PANIC("Unknown TxHttpVersion");
 		return HttpVersion2;
 	}
 
-	httpbridge::TxHttpVersion TranslateVersion(httpbridge::HttpVersion v)
+	httpbridge::TxHttpVersion TranslateVersion(hb::HttpVersion v)
 	{
 		switch (v)
 		{
@@ -187,7 +198,7 @@ namespace httpbridge
 		case HttpVersion11: return httpbridge::TxHttpVersion_Http11;
 		case HttpVersion2: return httpbridge::TxHttpVersion_Http2;
 		}
-		HTTPBRIDGE_PANIC();
+		HTTPBRIDGE_PANIC("Unknown HttpVersion");
 		return httpbridge::TxHttpVersion_Http2;
 	}
 
@@ -538,8 +549,7 @@ namespace httpbridge
 		for (auto item : waiting)
 			CloseWaiting(item);
 
-		if (WaitingBufferTotal != 0)
-			HTTPBRIDGE_PANIC();
+		HTTPBRIDGE_ASSERT(WaitingBufferTotal == 0);
 
 		delete Transport;
 		Transport = nullptr;
@@ -556,7 +566,7 @@ namespace httpbridge
 		{
 			ThreadId = std::this_thread::get_id();
 			Transport = transport;
-			HeaderCacheRecv = new httpbridge::HeaderCacheRecv();
+			HeaderCacheRecv = new hb::HeaderCacheRecv();
 			return true;
 		}
 		return false;
@@ -597,7 +607,8 @@ namespace httpbridge
 				}
 				else
 				{
-					canonical->WriteBodyData(request.FrameBodyOffset(), request.FrameBodyLength(), request.FrameBody());
+					// The (size_t) casts here are safe, because the maximum body length is limited by MaxWaitingBufferTotal, which is type size_t
+					canonical->WriteBodyData((size_t) request.FrameBodyOffset(), (size_t) request.FrameBodyLength(), request.FrameBody());
 					if (request.FrameBodyOffset() + request.FrameBodyLength() == canonical->BodyLength())
 					{
 						std::swap(request, *canonical);
@@ -630,7 +641,7 @@ namespace httpbridge
 		// If we run out of memory, or blow our memory budget, then we don't inform the caller.
 		// He can do nothing about it anyway.
 
-		if (request.BodyLength() + WaitingBufferTotal > MaxWaitingBufferTotal)
+		if (request.BodyLength() + (uint64_t) WaitingBufferTotal > (uint64_t) MaxWaitingBufferTotal)
 		{
 			AnyLog()->Log("MaxWaitingBufferTotal exceeded");
 			SendResponse(request, Status503_ServiceUnavailable);
@@ -644,7 +655,7 @@ namespace httpbridge
 			return;
 		}
 
-		WaitingBufferTotal += request.BodyLength();
+		WaitingBufferTotal += (size_t) request.BodyLength();
 
 		Request* copy = new Request();
 		std::swap(*copy, request);
@@ -689,12 +700,12 @@ namespace httpbridge
 			if (RecvSize >= frameSize)
 			{
 				// We have a frame to process.
-				const TxFrame* frame = GetTxFrame((uint8_t*) RecvBuf + 4);
-				if (frame->frametype() == TxFrameType_Header)
+				const httpbridge::TxFrame* frame = httpbridge::GetTxFrame((uint8_t*) RecvBuf + 4);
+				if (frame->frametype() == httpbridge::TxFrameType_Header)
 				{
 					UnpackHeader(frame, request);
 				}
-				else if (frame->frametype() == TxFrameType_Body)
+				else if (frame->frametype() == httpbridge::TxFrameType_Body)
 				{
 					UnpackBody(frame, request);
 				}
@@ -715,7 +726,7 @@ namespace httpbridge
 		return RecvResult_NoData;
 	}
 
-	void Backend::UnpackHeader(const TxFrame* frame, Request& request)
+	void Backend::UnpackHeader(const httpbridge::TxFrame* frame, Request& request)
 	{
 		auto headers = frame->headers();
 		size_t headerBlockSize = TotalHeaderBlockSize(frame);
@@ -726,7 +737,7 @@ namespace httpbridge
 
 		for (uint32_t i = 0; i < headers->size(); i++)
 		{
-			const TxHeaderLine* line = headers->Get(i);
+			const httpbridge::TxHeaderLine* line = headers->Get(i);
 			int32_t keyLen, valueLen;
 			const void *key, *value;
 			if (line->id() != 0)
@@ -759,21 +770,21 @@ namespace httpbridge
 		request.InitHeader(this, TranslateVersion(frame->version()), frame->channel(), frame->stream(), frame->body_total_length(), headers->size(), hblock);
 	}
 
-	void Backend::UnpackBody(const TxFrame* frame, Request& request)
+	void Backend::UnpackBody(const httpbridge::TxFrame* frame, Request& request)
 	{
 		void* body = Alloc(frame->body()->size(), Log);
 		memcpy(body, frame->body()->Data(), frame->body()->size());
 		request.InitBody(this, TranslateVersion(frame->version()), frame->channel(), frame->stream(), frame->body_total_length(), frame->body_offset(), frame->body()->size(), body);
 	}
 
-	size_t Backend::TotalHeaderBlockSize(const TxFrame* frame)
+	size_t Backend::TotalHeaderBlockSize(const httpbridge::TxFrame* frame)
 	{
 		// the +1 is for the terminal HeaderLine
 		size_t total = sizeof(Request::HeaderLine) * (frame->headers()->size() + 1);
 
 		for (uint32_t i = 0; i < frame->headers()->size(); i++)
 		{
-			const TxHeaderLine* line = frame->headers()->Get(i);
+			const httpbridge::TxHeaderLine* line = frame->headers()->Get(i);
 			if (line->key()->size() != 0)
 			{
 				total += line->key()->size() + line->value()->size();
@@ -795,7 +806,7 @@ namespace httpbridge
 	void Backend::LogAndPanic(const char* msg)
 	{
 		AnyLog()->Log(msg);
-		HTTPBRIDGE_PANIC();
+		HTTPBRIDGE_PANIC(msg);
 	}
 
 	void Backend::SendResponse(const Request& request, StatusCode status)
@@ -812,7 +823,7 @@ namespace httpbridge
 		
 		if (WaitingBufferTotal < request->BodyLength())
 			LogAndPanic("WaitingBufferTotal underflow");
-		WaitingBufferTotal -= request->BodyLength();
+		WaitingBufferTotal -= (size_t) request->BodyLength();
 
 		WaitingRequests.erase(key);
 		delete request;
@@ -832,7 +843,7 @@ namespace httpbridge
 		Free((void*) _FrameBody);
 	}
 
-	void Request::InitHeader(httpbridge::Backend* backend, HttpVersion version, uint64_t channel, uint64_t stream, uint64_t bodyTotalLength, int32_t headerCount, const void* headerBlock)
+	void Request::InitHeader(hb::Backend* backend, HttpVersion version, uint64_t channel, uint64_t stream, uint64_t bodyTotalLength, int32_t headerCount, const void* headerBlock)
 	{
 		_IsHeader = true;
 		_Version = version;
@@ -843,7 +854,7 @@ namespace httpbridge
 		HeaderBlock = (const uint8_t*) headerBlock;
 	}
 
-	void Request::InitBody(httpbridge::Backend* backend, HttpVersion version, uint64_t channel, uint64_t stream, uint64_t bodyTotalLength, uint64_t bodyOffset, uint64_t bodyBytes, const void* body)
+	void Request::InitBody(hb::Backend* backend, HttpVersion version, uint64_t channel, uint64_t stream, uint64_t bodyTotalLength, uint64_t bodyOffset, uint64_t bodyBytes, const void* body)
 	{
 		_IsHeader = false;
 		_Version = version;
@@ -944,15 +955,14 @@ namespace httpbridge
 
 	void Request::WriteBodyData(size_t offset, size_t len, const void* data)
 	{
-		if ((uint64_t) offset + (uint64_t) len > _BodyLength)
-			HTTPBRIDGE_PANIC();
+		HTTPBRIDGE_ASSERT((uint64_t) offset + (uint64_t) len <= _BodyLength);
 
 		memcpy((uint8_t*) _FrameBody + offset, data, len);
 	}
 
 	bool Request::ReallocForEntireBody()
 	{
-		void* newBody = Realloc((void*) _FrameBody, BodyLength(), _Backend->Log, false);
+		void* newBody = Realloc((void*) _FrameBody, (size_t) BodyLength(), _Backend->Log, false);
 		if (newBody == nullptr)
 			return false;
 		_FrameBody = newBody;
@@ -963,7 +973,7 @@ namespace httpbridge
 	BodyReader* Request::BodyReader()
 	{
 		if (_BodyReader == nullptr)
-			_BodyReader = new httpbridge::BodyReader(*this);
+			_BodyReader = new hb::BodyReader(*this);
 		return _BodyReader;
 	}
 	*/
@@ -1020,8 +1030,7 @@ namespace httpbridge
 	void Response::WriteHeader(size_t keyLen, const char* key, size_t valLen, const char* value)
 	{
 		// Ensure that our uint32_t casts down below are safe
-		if (keyLen > 1024*1024 || valLen > 1024*1024)
-			HTTPBRIDGE_PANIC();
+		HTTPBRIDGE_ASSERT(keyLen <= 1024 * 1024 && valLen <= 1024 * 1024);
 
 		HeaderIndex.Push(HeaderBuf.Size());
 		memcpy(HeaderBuf.AddSpace((uint32_t) keyLen), key, keyLen);
@@ -1033,8 +1042,7 @@ namespace httpbridge
 	void Response::SetBody(size_t len, const void* body)
 	{
 		// Ensure sanity, as well as safety because BodyLength is uint32
-		if (len > 1024*1024*1024)
-			HTTPBRIDGE_PANIC();
+		HTTPBRIDGE_ASSERT(len <= 1024 * 1024 * 1024);
 
 		CreateBuilder();
 		BodyOffset = (ByteVectorOffset) FBB->CreateVector((const uint8_t*) body, len).o;
@@ -1048,12 +1056,12 @@ namespace httpbridge
 	{
 		CreateBuilder();
 
-		std::vector<flatbuffers::Offset<TxHeaderLine>> lines;
+		std::vector<flatbuffers::Offset<httpbridge::TxHeaderLine>> lines;
 		{
 			char statusStr[4];
 			utoa((uint32_t) Status, statusStr);
 			auto key = FBB->CreateVector((const uint8_t*) statusStr, 3);
-			auto line = CreateTxHeaderLine(*FBB, key, 0, 0);
+			auto line = httpbridge::CreateTxHeaderLine(*FBB, key, 0, 0);
 			lines.push_back(line);
 		}
 
@@ -1065,22 +1073,22 @@ namespace httpbridge
 			uint32_t valLen = HeaderIndex[i + 2] - HeaderIndex[i + 1];
 			auto key = FBB->CreateVector((const uint8_t*) &HeaderBuf[HeaderIndex[i]], keyLen);
 			auto val = FBB->CreateVector((const uint8_t*) &HeaderBuf[HeaderIndex[i + 1]], valLen);
-			auto line = CreateTxHeaderLine(*FBB, key, val, 0);
+			auto line = httpbridge::CreateTxHeaderLine(*FBB, key, val, 0);
 			lines.push_back(line);
 		}
 		auto linesVector = FBB->CreateVector(lines);
 
-		TxFrameBuilder frame(*FBB);
+		httpbridge::TxFrameBuilder frame(*FBB);
 		frame.add_body(BodyOffset);
 		frame.add_body_offset(0);
 		frame.add_body_total_length(BodyLength);
 		frame.add_headers(linesVector);
 		frame.add_channel(Channel);
 		frame.add_stream(Stream);
-		frame.add_frametype(TxFrameType_Header);
+		frame.add_frametype(httpbridge::TxFrameType_Header);
 		frame.add_version(TranslateVersion(Version));
 		auto root = frame.Finish();
-		FinishTxFrameBuffer(*FBB, root);
+		httpbridge::FinishTxFrameBuffer(*FBB, root);
 		len = FBB->GetSize();
 		buf = FBB->GetBufferPointer();
 		
