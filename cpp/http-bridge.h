@@ -1,3 +1,6 @@
+#pragma once
+#ifndef HTTPBRIDGE_INCLUDED
+#define HTTPBRIDGE_INCLUDED
 /*
 
 ***************
@@ -75,6 +78,10 @@ namespace hb
 #define HTTPBRIDGE_PRINTF_FORMAT_Z
 #endif
 
+#ifndef HTTPBRIDGE_API
+#define HTTPBRIDGE_API
+#endif
+
 #ifdef _MSC_VER
 #define HTTPBRIDGE_NORETURN_PREFIX __declspec(noreturn)
 #define HTTPBRIDGE_NORETURN_SUFFIX
@@ -83,8 +90,8 @@ namespace hb
 #define HTTPBRIDGE_NORETURN_SUFFIX __attribute__((noreturn))
 #endif
 
-								void		PanicMsg(const char* file, int line, const char* msg);
-HTTPBRIDGE_NORETURN_PREFIX		void		BuiltinTrap() HTTPBRIDGE_NORETURN_SUFFIX;
+HTTPBRIDGE_API                            void PanicMsg(const char* file, int line, const char* msg);
+HTTPBRIDGE_API HTTPBRIDGE_NORETURN_PREFIX void BuiltinTrap() HTTPBRIDGE_NORETURN_SUFFIX;
 
 // HTTPBRIDGE_ASSERT is compiled in all builds (not just debug)
 #define HTTPBRIDGE_ASSERT(c)			(void) ((c) || (hb::PanicMsg(__FILE__,__LINE__,#c), hb::BuiltinTrap(), 0) )
@@ -129,20 +136,24 @@ HTTPBRIDGE_NORETURN_PREFIX		void		BuiltinTrap() HTTPBRIDGE_NORETURN_SUFFIX;
 		Status503_ServiceUnavailable = 503,
 	};
 
-	bool			Startup();								// Must be called before any other httpbridge functions are called
-	void			Shutdown();								// Must be called after all use of httpbridge
-	const char*		VersionString(HttpVersion version);		// Returns HTTP/1.0 HTTP/1.1 HTTP/2.0
-	size_t			Hash16B(uint64_t pair[2]);				// Hash 16 bytes
-	void			SleepNano(int64_t nanoseconds);
+	HTTPBRIDGE_API bool			Startup();								// Must be called before any other httpbridge functions are called
+	HTTPBRIDGE_API void			Shutdown();								// Must be called after all use of httpbridge
+	HTTPBRIDGE_API const char*	VersionString(HttpVersion version);		// Returns HTTP/1.0 HTTP/1.1 HTTP/2.0
+	HTTPBRIDGE_API const char*	StatusString(StatusCode status);		// "OK", "Not Found", etc
+	HTTPBRIDGE_API size_t		Hash16B(uint64_t pair[2]);				// Hash 16 bytes
+	HTTPBRIDGE_API void			SleepNano(int64_t nanoseconds);
+	HTTPBRIDGE_API void*		Alloc(size_t size, Logger* logger, bool panicOnFail = true);
+	HTTPBRIDGE_API void*		Realloc(void* buf, size_t size, Logger* logger, bool panicOnFail = true);
+	HTTPBRIDGE_API void			Free(void* buf);
 
-	class Logger
+	class HTTPBRIDGE_API Logger
 	{
 	public:
 		virtual void	Log(const char* msg);				// Default implementation writes to stdout
 		void			Logf(HTTPBRIDGE_PRINTF_FORMAT_Z const char* msg, ...);
 	};
 
-	class ITransport
+	class HTTPBRIDGE_API ITransport
 	{
 	public:
 		Logger*				Log = nullptr;						// Server::Connect copies its log in here during successful Connect()
@@ -257,7 +268,7 @@ namespace hb
 	/* A backend that wants to receive HTTP/2 requests
 	To connect to an upstream http-bridge server, call Connect("tcp", "host:port")
 	*/
-	class Backend
+	class HTTPBRIDGE_API Backend
 	{
 	public:
 		Logger*				Log = nullptr;								// This is not owned by Backend. Backend will never delete this.
@@ -299,7 +310,7 @@ namespace hb
 	to contain arbitrary binary data, so you may be missing something by not using the header accessor functions
 	that allow you to read through null characters, but that's your choice.
 	*/
-	class Request
+	class HTTPBRIDGE_API Request
 	{
 	public:
 		/*
@@ -342,17 +353,19 @@ namespace hb
 		// Returns true if the header exists, in which case val points to the start of the header value,
 		// and valLen contains the length of the header, excluding the null terminator.
 		// The buffer is guaranteed to be null terminated, regardless of its contents.
+		// 'nth' allows you to fetch multiple headers, if there is more than one header with the same name.
+		// Set nth=0 to fetch the first header, nth=1 to fetch the 2nd, etc.
 		// Returns false if the header does not exist.
-		bool					HeaderByName(const char* name, size_t& valLen, const void*& val) const;
+		bool					HeaderByName(const char* name, size_t& valLen, const void*& val, int nth = 0) const;
 
 		// Using this function means you cannot consume headers with embedded null characters in them, but a lot of the time that's OK.
 		// Returns null if the header does not exist.
-		const char*				HeaderByName(const char* name) const;
+		const char*				HeaderByName(const char* name, int nth = 0) const;
 
 		// Retrieve a header by index (valid indexes are 0 .. HeaderCount()-1)
 		// Both key and val are guaranteed to be null terminated. keyLen and valLen are the length of
 		// key and val, respectively, but the lengths do not include the null terminators.
-		void					HeaderAt(int32_t index, int32_t& keyLen, const void*& key, int32_t& valLen, const void*& val) const;
+		void					HeaderAt(int32_t index, int32_t& keyLen, const char*& key, int32_t& valLen, const char*& val) const;
 
 		// Using this function means you cannot consume headers with embedded null characters in them, but a lot of the time that's OK.
 		void					HeaderAt(int32_t index, const char*& key, const char*& val) const;
@@ -404,7 +417,7 @@ namespace hb
 
 	/* HTTP Response
 	*/
-	class Response
+	class HTTPBRIDGE_API Response
 	{
 	public:
 		typedef uint32_t ByteVectorOffset;
@@ -417,21 +430,41 @@ namespace hb
 		Response();
 		~Response();
 
-		void Init(const Request& request);														// Copy [Stream, Channel, Version] from request
-		void WriteHeader(const char* key, const char* value);									// Add a header
-		void WriteHeader(size_t keyLen, const char* key, size_t valLen, const char* value);		// Add a header
-		void SetBody(size_t len, const void* body);												// Set the entire body.
+		void			Init(const Request& request);														// Copy [Stream, Channel, Version] from request
+		void			SetStatus(StatusCode status)														{ Status = status; }
+		void			WriteHeader(const char* key, const char* value);									// Add a header
+		void			WriteHeader(int32_t keyLen, const char* key, int32_t valLen, const char* value);	// Add a header
+		void			SetBody(size_t len, const void* body);												// Set the entire body.
 		
-		void Finish(size_t& len, void*& buf);
+		int32_t			HeaderCount() const { return HeaderIndex.Size() / 2; }
+
+		// Fetch a header by name.
+		// Returns null if the header does not exist.
+		const char*		HeaderByName(const char* name, int nth = 0) const;
+
+		// Both key and val are guaranteed to be null terminated
+		void			HeaderAt(int32_t index, int32_t& keyLen, const char*& key, int32_t& valLen, const char*& val) const;
+		
+		// Both key and val are guaranteed to be null terminated
+		void			HeaderAt(int32_t index, const char*& key, const char*& val) const;
+
+		void			FinishFlatbuffer(size_t& len, void*& buf);
+		void			SerializeToHttp(size_t& len, void*& buf);											// The returned 'buf' must be freed with free()
 
 	private:
 		flatbuffers::FlatBufferBuilder*		FBB = nullptr;
 		ByteVectorOffset					BodyOffset = 0;
 		uint32_t							BodyLength = 0;
+		bool								IsFlatBufferBuilt = false;
+
+		// Our header keys and values are always null terminated. This is necessary in order
+		// to provide a consistent API between Request and Response objects.
 		Vector<uint32_t>					HeaderIndex;
 		Vector<char>						HeaderBuf;
 
-		void CreateBuilder();
+		void	CreateBuilder();
+		int32_t	HeaderKeyLen(int32_t i) const;
+		int32_t	HeaderValueLen(int32_t i) const;
 	};
 }
 
@@ -446,3 +479,4 @@ namespace std
 		memset(&tmp, 0, sizeof(tmp));
 	}
 }
+#endif

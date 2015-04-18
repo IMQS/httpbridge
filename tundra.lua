@@ -15,7 +15,27 @@ Build {
 			},
 		}
 
-		Default(example_backend)
+		local server = Program {
+			Name = "server",
+			Sources = {
+				"cpp/server/server.cpp",
+				"cpp/server/server.h",
+				"cpp/server/main.cpp",
+				"cpp/server/http11/http11_common.h",
+				"cpp/server/http11/http11_parser.c",
+				"cpp/server/http11/http11_parser.h",
+				"cpp/http-bridge.cpp",
+			},
+			Includes = {
+				"cpp/flatbuffers/include",
+			},
+			Libs = {
+				{ "Ws2_32.lib"; Config = "win*" },
+				{ "stdc++"; Config = {"*-gcc-*", "*-clang-*"} },
+			},
+		}
+
+		Default(example_backend, server)
 	end,
 
 	Env = {
@@ -81,5 +101,7 @@ Build {
 
 		-- Override output directory for sln/vcxproj files.
 		MsvcSolutionDir = 'vs2013',
+
+	    BuildAllByDefault = true,
 	}
 }

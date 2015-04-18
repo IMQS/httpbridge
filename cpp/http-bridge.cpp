@@ -21,6 +21,10 @@ namespace hb
 	//////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 	//////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
+	// These are arbitrary maximums, chosen for sanity, and to fit within a signed 32-bit int
+	static const int MaxHeaderKeyLen = 1024;
+	static const int MaxHeaderValueLen = 1024 * 1024;
+
 	void PanicMsg(const char* file, int line, const char* msg)
 	{
 		fprintf(stderr, "httpbridge panic %s:%d: %s\n", file, line, msg);
@@ -65,6 +69,17 @@ namespace hb
 		case HttpVersion2: return "HTTP/2";
 		default: return "HTTP/?.?";
 		}
+	}
+
+	const char*	StatusString(StatusCode status)
+	{
+		switch (status)
+		{
+		case Status200_OK: return "OK";
+		case Status400_BadRequest: return "Bad Request";
+		case Status503_ServiceUnavailable: return "Service Unavailable";
+		}
+		return "Unknown";
 	}
 
 	size_t Hash16B(uint64_t pair[2])
@@ -146,7 +161,7 @@ namespace hb
 		b[3] = v >> 24;
 	}
 
-	void* Alloc(size_t size, Logger* logger, bool panicOnFail = true)
+	void* Alloc(size_t size, Logger* logger, bool panicOnFail)
 	{
 		void* b = malloc(size);
 		if (b == nullptr)
@@ -159,7 +174,7 @@ namespace hb
 		return b;
 	}
 
-	void* Realloc(void* buf, size_t size, Logger* logger, bool panicOnFail = true)
+	void* Realloc(void* buf, size_t size, Logger* logger, bool panicOnFail)
 	{
 		void* newBuf = realloc(buf, size);
 		if (newBuf == nullptr)
@@ -176,6 +191,12 @@ namespace hb
 	void Free(void* buf)
 	{
 		free(buf);
+	}
+
+	static void BufWrite(uint8_t*& buf, const void* src, size_t len)
+	{
+		memcpy(buf, src, len);
+		buf += len;
 	}
 
 	hb::HttpVersion TranslateVersion(httpbridge::TxHttpVersion v)
@@ -577,7 +598,7 @@ namespace hb
 		size_t offset = 0;
 		size_t len = 0;
 		void* buf = nullptr;
-		response.Finish(len, buf);
+		response.FinishFlatbuffer(len, buf);
 		while (offset != len)
 		{
 			size_t sent = 0;
@@ -889,7 +910,7 @@ namespace hb
 		return (const char*) (HeaderBlock + lines[0].KeyStart + lines[0].KeyLen + 1);
 	}
 
-	bool Request::HeaderByName(const char* name, size_t& len, const void*& buf) const
+	bool Request::HeaderByName(const char* name, size_t& len, const void*& buf, int nth) const
 	{
 		auto nameLen = strlen(name);
 		auto count = HeaderCount() + NumPseudoHeaderLines;
@@ -898,6 +919,9 @@ namespace hb
 		{
 			const uint8_t* bKey = HeaderBlock + lines[i].KeyStart;
 			if (memcmp(bKey, name, nameLen) == 0)
+				nth--;
+
+			if (nth == -1)
 			{
 				buf = HeaderBlock + (lines[i].KeyStart + lines[i].KeyLen);
 				len = lines[i + 1].KeyStart - (lines[i].KeyStart + lines[i].KeyLen);
@@ -907,17 +931,17 @@ namespace hb
 		return false;
 	}
 
-	const char* Request::HeaderByName(const char* name) const
+	const char* Request::HeaderByName(const char* name, int nth) const
 	{
 		size_t len;
 		const void* buf;
-		if (HeaderByName(name, len, buf))
+		if (HeaderByName(name, len, buf, nth))
 			return (const char*) buf;
 		else
 			return nullptr;
 	}
 
-	void Request::HeaderAt(int32_t index, int32_t& keyLen, const void*& key, int32_t& valLen, const void*& val) const
+	void Request::HeaderAt(int32_t index, int32_t& keyLen, const char*& key, int32_t& valLen, const char*& val) const
 	{
 		if ((uint32_t) index >= (uint32_t) HeaderCount())
 		{
@@ -931,16 +955,16 @@ namespace hb
 			index += NumPseudoHeaderLines;
 			auto lines = (const HeaderLine*) HeaderBlock;
 			keyLen = lines[index].KeyLen;
-			key = HeaderBlock + lines[index].KeyStart;
+			key = (const char*) (HeaderBlock + lines[index].KeyStart);
 			valLen = lines[index + 1].KeyStart - (lines[index].KeyStart + lines[index].KeyLen);
-			val = HeaderBlock + lines[index].KeyStart + lines[index].KeyLen + 1;
+			val = (const char*) (HeaderBlock + lines[index].KeyStart + lines[index].KeyLen + 1);
 		}
 	}
 
 	void Request::HeaderAt(int32_t index, const char*& key, const char*& val) const
 	{
 		int32_t keyLen, valLen;
-		HeaderAt(index, keyLen, (const void*&) key, valLen, (const void*&) val);
+		HeaderAt(index, keyLen, key, valLen, val);
 	}
 
 	void Request::ResendWhenBodyIsDone()
@@ -1008,11 +1032,6 @@ namespace hb
 	{
 		if (FBB != nullptr)
 			delete FBB;
-		//if (Frame != nullptr)
-		//{
-		//	delete &Frame->fbb_;
-		//	delete Frame;
-		//}
 	}
 
 	void Response::Init(const Request& request)
@@ -1024,19 +1043,28 @@ namespace hb
 	
 	void Response::WriteHeader(const char* key, const char* value)
 	{
-		WriteHeader(strlen(key), key, strlen(value), value);
+		size_t keyLen = strlen(key);
+		size_t valLen = strlen(value);
+		HTTPBRIDGE_ASSERT(keyLen <= MaxHeaderKeyLen);
+		HTTPBRIDGE_ASSERT(valLen <= MaxHeaderValueLen);
+		WriteHeader((int) keyLen, key, (int) valLen, value);
 	}
 
-	void Response::WriteHeader(size_t keyLen, const char* key, size_t valLen, const char* value)
+	void Response::WriteHeader(int32_t keyLen, const char* key, int32_t valLen, const char* value)
 	{
-		// Ensure that our uint32_t casts down below are safe
-		HTTPBRIDGE_ASSERT(keyLen <= 1024 * 1024 && valLen <= 1024 * 1024);
+		// Ensure that our uint32_t casts down below are safe, and also header sanity
+		HTTPBRIDGE_ASSERT(keyLen <= MaxHeaderKeyLen && valLen <= MaxHeaderValueLen);
+		
+		// Keys may not be empty, but values are allowed to be empty
+		HTTPBRIDGE_ASSERT(keyLen > 0 && valLen >= 0);
 
 		HeaderIndex.Push(HeaderBuf.Size());
 		memcpy(HeaderBuf.AddSpace((uint32_t) keyLen), key, keyLen);
-		
+		HeaderBuf.Push(0);
+
 		HeaderIndex.Push(HeaderBuf.Size());
 		memcpy(HeaderBuf.AddSpace((uint32_t) valLen), value, valLen);
+		HeaderBuf.Push(0);
 	}
 
 	void Response::SetBody(size_t len, const void* body)
@@ -1047,13 +1075,50 @@ namespace hb
 		CreateBuilder();
 		BodyOffset = (ByteVectorOffset) FBB->CreateVector((const uint8_t*) body, len).o;
 		BodyLength = (uint32_t) len;
-		//Frame->add_body(Frame->fbb_.CreateVector((const uint8_t*) body, len));
-		//Frame->add_body_offset(0);
-		//Frame->add_body_total_length(len);
 	}
 
-	void Response::Finish(size_t& len, void*& buf)
+	const char* Response::HeaderByName(const char* name, int nth) const
 	{
+		for (int32_t index = 0; index < HeaderCount(); index++)
+		{
+			int i = index << 1;
+			const char* key = &HeaderBuf[HeaderIndex[i]];
+			const char* val = &HeaderBuf[HeaderIndex[i + 1]];
+			if (strcmp(key, name) == 0)
+				nth--;
+			if (nth == -1)
+				return val;
+		}
+		return nullptr;
+	}
+
+	void Response::HeaderAt(int32_t index, int32_t& keyLen, const char*& key, int32_t& valLen, const char*& val) const
+	{
+		if (index > HeaderCount())
+		{
+			keyLen = 0;
+			valLen = 0;
+			key = nullptr;
+			val = nullptr;
+			return;
+		}
+		keyLen = HeaderKeyLen(index);
+		valLen = HeaderValueLen(index);
+		int i = index << 1;
+		key = &HeaderBuf[HeaderIndex[i]];
+		val = &HeaderBuf[HeaderIndex[i + 1]];
+	}
+
+	void Response::HeaderAt(int32_t index, const char*& key, const char*& val) const
+	{
+		int32_t keyLen, valLen;
+		HeaderAt(index, keyLen, key, valLen, val);
+	}
+
+	void Response::FinishFlatbuffer(size_t& len, void*& buf)
+	{
+		HTTPBRIDGE_ASSERT(!IsFlatBufferBuilt);
+
 		CreateBuilder();
 
 		std::vector<flatbuffers::Offset<httpbridge::TxHeaderLine>> lines;
@@ -1069,8 +1134,9 @@ namespace hb
 
 		for (int32_t i = 0; i < HeaderIndex.Size() - 2; i += 2)
 		{
-			uint32_t keyLen = HeaderIndex[i + 1] - HeaderIndex[i];
-			uint32_t valLen = HeaderIndex[i + 2] - HeaderIndex[i + 1];
+			// The extra 1's here are for removing the null terminator that we add to keys and values
+			uint32_t keyLen = HeaderIndex[i + 1] - HeaderIndex[i] - 1;
+			uint32_t valLen = HeaderIndex[i + 2] - HeaderIndex[i + 1] - 1;
 			auto key = FBB->CreateVector((const uint8_t*) &HeaderBuf[HeaderIndex[i]], keyLen);
 			auto val = FBB->CreateVector((const uint8_t*) &HeaderBuf[HeaderIndex[i + 1]], valLen);
 			auto line = httpbridge::CreateTxHeaderLine(*FBB, key, val, 0);
@@ -1092,7 +1158,9 @@ namespace hb
 		len = FBB->GetSize();
 		buf = FBB->GetBufferPointer();
 		
-		// Hack the FBB to write our frame size at the start of the buffer
+		// Hack the FBB to write our frame size at the start of the buffer.
+		// This is not a 'hack' in the sense that it's bad or needs to be removed at some point.
+		// It's simply not the intended use of FBB.
 		// Right here 'len' contains the size of the flatbuffer, which is our "frame size"
 		uint8_t frame_size[4];
 		Write32LE(frame_size, (uint32_t) len);
@@ -1100,19 +1168,102 @@ namespace hb
 		len = FBB->GetSize();
 		buf = FBB->GetBufferPointer();
 		// Now 'len' contains the size of the flatbuffer + 4
+
+		IsFlatBufferBuilt = true;
+	}
+
+	void Response::SerializeToHttp(size_t& len, void*& buf)
+	{
+		// This doesn't make any sense. Additionally, we need the guarantee that our
+		// Body is always FBB->GetBufferPointer() + 4, because we're reaching into the
+		// FBB internals here.
+		HTTPBRIDGE_ASSERT(!IsFlatBufferBuilt);
+
+		if (HeaderByName("Content-Length") == nullptr)
+		{
+			char s[11]; // 10 characters needed for 4294967295
+			utoa(BodyLength, s);
+			WriteHeader("Content-Length", s);
+		}
+
+		// Compute response size
+		const size_t sCRLF = 2;
+		const int32_t headerCount = HeaderCount();
+		
+		// HTTP/1.1 200		12 bytes
+		len = 12 + 1 + strlen(StatusString(Status)) + sCRLF;
+		
+		// Headers
+		// 2		The ": " in between the key and value of each header
+		// CRLF		The newline after each header
+		// -2		The null terminators that we add to each key and each value (and counted up inside HeaderBuf.size)
+		len += headerCount * (2 + sCRLF - 2) + HeaderBuf.Size();
+		len += sCRLF;
+		len += BodyLength;
+
+		// Write response
+		buf = malloc(len);
+		HTTPBRIDGE_ASSERT(buf != nullptr);
+		uint8_t* out = (uint8_t*) buf;
+		const char* CRLF = "\r\n";
+
+		BufWrite(out, "HTTP/1.1 ", 9);
+		char statusNStr[4];
+		utoa((uint32_t) Status, statusNStr);
+		BufWrite(out, statusNStr, 3);
+		BufWrite(out, " ", 1);
+		BufWrite(out, StatusString(Status), strlen(StatusString(Status)));
+		BufWrite(out, CRLF, 2);
+
+		for (int32_t i = 0; i < headerCount * 2; i += 2)
+		{
+			// The extra 1's here are for removing the null terminator that we add to keys and values
+			uint32_t valTop = i + 2 == HeaderIndex.Size() ? HeaderBuf.Size() : HeaderIndex[i + 2];
+			uint32_t keyLen = HeaderIndex[i + 1] - HeaderIndex[i] - 1;
+			uint32_t valLen = valTop - HeaderIndex[i + 1] - 1;
+			BufWrite(out, &HeaderBuf[HeaderIndex[i]], keyLen);
+			BufWrite(out, ": ", 2);
+			BufWrite(out, &HeaderBuf[HeaderIndex[i + 1]], valLen);
+			BufWrite(out, CRLF, 2);
+		}
+		BufWrite(out, CRLF, 2);
+
+		// Write body
+		uint8_t* flatbuf = FBB->GetBufferPointer();
+		BufWrite(out, flatbuf + 4, BodyLength);
 	}
 
 	void Response::CreateBuilder()
 	{
-		//if (Frame == nullptr)
-		//{
-		//	auto builder = new flatbuffers::FlatBufferBuilder();
-		//	Frame = new TxFrameBuilder(*builder);
-		//}
 		if (FBB == nullptr)
-		{
 			FBB = new flatbuffers::FlatBufferBuilder();
-		}
+	}
+
+	int32_t Response::HeaderKeyLen(int32_t _i) const
+	{
+		// key_0_start, val_0_start, key_1_start, val_1_start, ...
+		// (with null terminators after each key and each value)
+		uint32_t i = _i;
+		i <<= 1;
+		if (i + 1 >= (uint32_t) HeaderIndex.Size())
+			return 0;
+		return HeaderIndex[i + 1] - HeaderIndex[i] - 1; // extra -1 is to remove null terminator
+	}
+
+	int32_t Response::HeaderValueLen(int32_t _i) const
+	{
+		uint32_t i = _i;
+		i <<= 1;
+		uint32_t top;
+		if (i + 3 >= (uint32_t) HeaderIndex.Size())
+			return 0;
+
+		if (i + 2 == HeaderIndex.Size())
+			top = HeaderBuf.Size();
+		else
+			top = HeaderIndex[i + 2];
+
+		return top - HeaderIndex[i + 1] - 1; // extra -1 is to remove null terminator
 	}
 
 }
