@@ -265,6 +265,13 @@ namespace hb
 {
 	typedef std::unordered_map<StreamKey, Request*> StreamToRequestMap;
 
+	// A frame received from the client
+	class HTTPBRIDGE_API FrameIn
+	{
+	public:
+
+	};
+
 	/* A backend that wants to receive HTTP/2 requests
 	To connect to an upstream http-bridge server, call Connect("tcp", "host:port")
 	*/
@@ -272,7 +279,8 @@ namespace hb
 	{
 	public:
 		Logger*				Log = nullptr;								// This is not owned by Backend. Backend will never delete this.
-		size_t				MaxWaitingBufferTotal = 256 * 1024 * 1024;	// Maximum number of bytes that will be allocated for 'ResendWhenBodyIsDone' requests.
+		size_t				MaxWaitingBufferTotal = 256 * 1024 * 1024;	// Maximum number of bytes that will be allocated for 'ResendWhenBodyIsDone' requests. Total shared by all pending requests.
+		size_t				MaxAutoBufferSize = 16 * 1024 * 1024;		// Maximum size of a single request who's body will be automatically sent through 'ResendWhenBodyIsDone'. Set to zero to disable.
 
 							Backend();
 							~Backend();							// This calls Close()
@@ -338,6 +346,9 @@ namespace hb
 		// Set a piece of the body. The Request object now owns body, and will Free() it in the destructor
 		void					InitBody(Backend* backend, HttpVersion version, uint64_t channel, uint64_t stream, uint64_t bodyTotalLength, uint64_t bodyOffset, uint64_t bodyBytes, const void* body);
 
+		// Free any memory that we own, and then initialize to a newly-constructed Request
+		void					Reset();
+
 		hb::Backend*			Backend() const		{ return _Backend; }
 		bool					IsHeader() const	{ return _IsHeader; }		// If not header, then only body
 		uint64_t				Channel() const		{ return _Channel; }
@@ -382,9 +393,6 @@ namespace hb
 		// The total length of the body of this request
 		uint64_t				BodyLength() const { return _BodyLength; }
 
-		// Return a BodyReader object, which allows you to synchronously read the entire body of this request
-		//BodyReader*				BodyReader();
-
 		// Put this request back in the queue, and call us again when the client has sent all of the request body.
 		// If IsEntireBodyInsideHeader() is true, or this is not a HEADER frame, then this function panics.
 		void					ResendWhenBodyIsDone();
@@ -402,7 +410,6 @@ namespace hb
 	private:
 		static const int		NumPseudoHeaderLines = 1;
 		hb::Backend*			_Backend = nullptr;
-		//hb::BodyReader*		_BodyReader = nullptr;
 		bool					_IsHeader = false;			// else Body
 		HttpVersion				_Version = HttpVersion10;
 		uint64_t				_Channel = 0;
@@ -413,6 +420,8 @@ namespace hb
 		uint64_t				_FrameBodyOffset = 0;
 		uint64_t				_FrameBodyLength = 0;
 		uint64_t				_BodyLength = 0;
+
+		void					Free();
 	};
 
 	/* HTTP Response

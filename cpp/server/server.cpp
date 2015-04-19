@@ -116,14 +116,10 @@ void Server::cb_fragment(void *data, const char *at, size_t length)
 
 void Server::cb_request_path(void *data, const char *at, size_t length)
 {
-	Channel* c = (Channel*) data;
-	c->Path = std::string(at, length);
 }
 
 void Server::cb_query_string(void *data, const char *at, size_t length)
 {
-	Channel* c = (Channel*) data;
-	c->Query = std::string(at, length);
 }
 
 void Server::cb_http_version(void *data, const char *at, size_t length)
@@ -277,6 +273,7 @@ bool Server::ReadFromChannel(Channel& c)
 		if (!!http_parser_is_finished(parser))
 		{
 			HandleRequest(c);
+			ResetChannel(c);
 		}
 		return true;
 	}
@@ -316,6 +313,17 @@ void Server::HandleRequest(Channel& c)
 	}
 
 	Free(buf);
+}
+
+void Server::ResetChannel(Channel& c)
+{
+	http_parser_init(GetParser(c));
+	c.ContentLength = 0;
+	c.Headers.clear();
+	c.Method = "";
+	c.Request.Reset();
+	c.URI = "";
+	c.Version = hb::HttpVersion10;
 }
 
 void Server::Close()

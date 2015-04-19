@@ -615,6 +615,17 @@ namespace hb
 		RecvResult res = RecvInternal(request);
 		if (res == RecvResult_Data)
 		{
+			// Automatically place requests into the 'ResendWhenBodyIsDone' queue
+			if (request.IsHeader() && !request.IsEntireBodyInsideHeader() && request.BodyLength() <= MaxAutoBufferSize)
+			{
+				ResendWhenBodyIsDone(request);
+				return RecvResult_NoData;
+			}
+		}
+
+		if (res == RecvResult_Data)
+		{
+			// Process 'ResendWhenBodyIsDone' requests
 			StreamKey key = { request.Channel(), request.Stream() };
 			auto m = WaitingRequests.find(key);
 			if (m != WaitingRequests.end())
@@ -860,8 +871,7 @@ namespace hb
 
 	Request::~Request()
 	{
-		Free((void*) HeaderBlock);
-		Free((void*) _FrameBody);
+		Free();
 	}
 
 	void Request::InitHeader(hb::Backend* backend, HttpVersion version, uint64_t channel, uint64_t stream, uint64_t bodyTotalLength, int32_t headerCount, const void* headerBlock)
@@ -885,6 +895,12 @@ namespace hb
 		_FrameBodyOffset = bodyOffset;
 		_FrameBodyLength = bodyBytes;
 		_FrameBody = body;
+	}
+
+	void Request::Reset()
+	{
+		Free();
+		*this = Request();
 	}
 
 	HttpVersion Request::Version() const
@@ -993,30 +1009,11 @@ namespace hb
 		return true;
 	}
 
-	/*
-	BodyReader* Request::BodyReader()
+	void Request::Free()
 	{
-		if (_BodyReader == nullptr)
-			_BodyReader = new hb::BodyReader(*this);
-		return _BodyReader;
+		hb::Free((void*) HeaderBlock);
+		hb::Free((void*) _FrameBody);
 	}
-	*/
-
-	//////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-	//////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-	//////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-
-#ifdef HTTPBRIDGE_A_BAD_IDEA
-	BodyReader::BodyReader(const Request& request)
-	{
-
-	}
-
-	void BodyReader::Send(Request& bodyFrame)
-	{
-
-	}
-#endif
 
 	//////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 	//////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////

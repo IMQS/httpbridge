@@ -28,27 +28,19 @@ int main(int argc, char** argv)
 		{
 			if (request.IsHeader())
 			{
-				if (!request.IsEntireBodyInsideHeader() && request.BodyLength() < 1024 * 1024)
+				printf("-----------------------------\n");
+				printf("%d %d %s %s %s\n", (int) request.Channel(), (int) request.Stream(), request.Method(), request.URI(), hb::VersionString(request.Version()));
+				for (int i = 0; i < request.HeaderCount(); i++)
 				{
-					backend.ResendWhenBodyIsDone(request);
+					const char *key, *val;
+					request.HeaderAt(i, key, val);
+					printf("  %-16s = %s\n", key, val);
 				}
-				else
-				{
-					printf("-----------------------------\n");
-					printf("%d %d %s %s %s\n", (int) request.Channel(), (int) request.Stream(), request.Method(), request.URI(), hb::VersionString(request.Version()));
-					for (int i = 0; i < request.HeaderCount(); i++)
-					{
-						const char *key, *val;
-						request.HeaderAt(i, key, val);
-						printf("  %-16s = %s\n", key, val);
-					}
-					hb::Response response;
-					response.Init(request);
-					response.Status = hb::Status200_OK;
-					//response.WriteHeader("Content-Length", "5");
-					response.SetBody(5, "hello");
-					backend.Send(response);
-				}
+				hb::Response response;
+				response.Init(request);
+				response.Status = hb::Status200_OK;
+				response.SetBody(5, "hello");
+				backend.Send(response);
 			}
 			else
 			{

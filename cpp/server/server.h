@@ -65,8 +65,6 @@ public:
 
 		std::string		Method;
 		std::string		URI;
-		std::string		Path;
-		std::string		Query;
 		uint64_t		ContentLength = 0;
 		HttpVersion		Version = HttpVersion10;
 		std::vector<std::pair<std::string, std::string>> Headers;
@@ -95,8 +93,9 @@ private:
 
 	void Accept();
 	void Process();
-	bool ReadFromChannel(Channel& c); // Returns false if we must close the socket
+	bool ReadFromChannel(Channel& c);	// Returns false if we must close the socket
 	void HandleRequest(Channel& c);
+	void ResetChannel(Channel& c);		// Reset channel, so that it can serve another request on the same socket
 	void Close();
 
 	/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
