@@ -1,4 +1,5 @@
 #include "../http-bridge.h"
+#include "../http-bridge_generated.h"
 #include "server.h"
 #include "http11/http11_parser.h"
 #ifndef _WIN32
@@ -49,38 +50,21 @@ Server::~Server()
 	Close();
 }
 
-bool Server::ListenAndRun(uint16_t port)
+bool Server::ListenAndRun(const char* addr, uint16_t httpPort, uint16_t backendPort)
 {
 	StopSignal = 0;
+	NextChannelID = 1;
 
-	ListenSocket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-	if (ListenSocket == InvalidSocket)
+	bool httpOK = CreateSocketAndListen(HttpListenSocket, addr, httpPort);
+	bool backendOK = CreateSocketAndListen(BackendListenSocket, addr, backendPort);
+	if (!(httpOK && backendOK))
 	{
-		fprintf(Log, "socket() failed: %d\n", LastError());
-		return false;
-	}
-
-	sockaddr_in service;
-	service.sin_family = AF_INET;
-	inet_pton(AF_INET, "127.0.0.1", &service.sin_addr);
-	service.sin_port = htons(port);
-
-	int err = bind(ListenSocket, (sockaddr*) &service, sizeof(service));
-	if (err == ErrSOCKET_ERROR)
-	{
-		fprintf(Log, "bind() failed: %d\n", LastError());
 		Close();
 		return false;
 	}
 
-	if (listen(ListenSocket, SOMAXCONN) == ErrSOCKET_ERROR)
-	{
-		fprintf(Log, "listen() failed: %d\n", LastError());
-		Close();
-		return false;
-	}
-
-	fprintf(Log, "http server listening on %d\n", (int) port);
+	fprintf(Log, "http listening on %d\n", (int) httpPort);
+	fprintf(Log, "backend listening on %d\n", (int) backendPort);
 
 	Process();
 	Close();
@@ -179,18 +163,49 @@ void Server::cb_header_done(void *data, const char *at, size_t length)
 // http_parser callbacks (end)
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
-void Server::Accept()
+bool Server::CreateSocketAndListen(socket_t& sock, const char* addr, uint16_t port)
+{
+	sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+	if (sock == InvalidSocket)
+	{
+		fprintf(Log, "socket() failed: %d\n", LastError());
+		return false;
+	}
+
+	sockaddr_in service;
+	service.sin_family = AF_INET;
+	inet_pton(AF_INET, addr, &service.sin_addr);
+	service.sin_port = htons(port);
+
+	int err = bind(sock, (sockaddr*) &service, sizeof(service));
+	if (err == ErrSOCKET_ERROR)
+	{
+		fprintf(Log, "bind() on %s:%d failed: %d\n", addr, (int) port, LastError());
+		return false;
+	}
+
+	if (listen(sock, SOMAXCONN) == ErrSOCKET_ERROR)
+	{
+		fprintf(Log, "listen() on %s:%d failed: %d\n", addr, (int) port, LastError());
+		return false;
+	}
+
+	return true;
+}
+
+void Server::AcceptHttp()
 {
 	sockaddr_in addr;
 	socklen_t addr_len = sizeof(addr);
-	socket_t newSock = accept(ListenSocket, (sockaddr*) &addr, &addr_len);
+	socket_t newSock = accept(HttpListenSocket, (sockaddr*) &addr, &addr_len);
 	if (newSock == InvalidSocket)
 	{
-		fprintf(Log, "accept() failed: %d\n", LastError());
+		fprintf(Log, "http accept() failed: %d\n", LastError());
 		return;
 	}
 	Channel* chan = new Channel();
 	chan->Socket = newSock;
+	chan->ChannelID = NextChannelID++;
 	auto parser = new http_parser();
 	http_parser_init(parser);
 	parser->data = chan;
@@ -207,32 +222,53 @@ void Server::Accept()
 	fprintf(Log, "[%d] socked opened\n", (int) chan->Socket);
 }
 
+void Server::AcceptBackend()
+{
+	sockaddr_in addr;
+	socklen_t addr_len = sizeof(addr);
+	BackendSock = accept(BackendListenSocket, (sockaddr*) &addr, &addr_len);
+	if (BackendSock == InvalidSocket)
+		fprintf(Log, "backend accept() failed: %d\n", LastError());
+}
+
 void Server::Process()
 {
 	while (StopSignal.load() == 0)
 	{
 		fd_set readable;
-		socket_t maxSocket = ListenSocket;
+		socket_t maxSocket = HttpListenSocket;
 		FD_ZERO(&readable);
-		FD_SET(ListenSocket, &readable);
+		FD_SET(HttpListenSocket, &readable);
+		if (BackendSock == InvalidSocket)
+		{
+			FD_SET(BackendListenSocket, &readable);
+			maxSocket = BackendListenSocket > maxSocket ? BackendListenSocket : maxSocket;
+		}
 		for (auto c : Channels)
 		{
-			maxSocket = c->Socket > maxSocket ? c->Socket : maxSocket;
 			FD_SET(c->Socket, &readable);
+			maxSocket = c->Socket > maxSocket ? c->Socket : maxSocket;
 		}
 		timeval to;
 		to.tv_sec = 0;
 		to.tv_usec = 1000 * 1000; // 1000 milliseconds
 		int n = select((int) (maxSocket + 1), &readable, nullptr, nullptr, &to);
-		if (n == 0)
+		if (n <= 0)
 			continue;
 
-		// This is necesary on unix, because select() will abort on Ctrl+C
+		// This is necesary on unix, because select() will abort on Ctrl+C, and then accept will block
+		// [Check the above statement. It was written before changing the condition from (n == 0) to (n <= 0)]
 		if (StopSignal.load() != 0)
 			break;
 
-		if (FD_ISSET(ListenSocket, &readable) && Channels.size() < MaxChannels)
-			Accept();
+		if (FD_ISSET(HttpListenSocket, &readable) && Channels.size() < MaxChannels)
+			AcceptHttp();
+
+		if (FD_ISSET(BackendListenSocket, &readable))
+			AcceptBackend();
+
+		if (FD_ISSET(BackendSock, &readable))
+			ReadFromBackend();
 
 		for (size_t i = 0; i < Channels.size(); i++)
 		{
@@ -279,8 +315,94 @@ bool Server::ReadFromChannel(Channel& c)
 	}
 	else
 	{
-		fprintf(Log, "[%d] recv error (%d)\n", (int) c.Socket, (int) LastError());
+		fprintf(Log, "[%d] recv error (%d)\n", (int) c.Socket, LastError());
 		return false;
+	}
+}
+
+void Server::ReadFromBackend()
+{
+	int maxRead = 65536;
+	uint8_t* dst = BackendRecvBuf.Preallocate(maxRead);
+	int nread = recv(BackendSock, (char*) dst, maxRead, 0);
+	if (nread > 0)
+	{
+		BackendRecvBuf.Count += nread;
+		if (BackendRecvBuf.Count > 4)
+		{
+			uint32_t frameSize = Read32LE(BackendRecvBuf.Data);
+			if (BackendRecvBuf.Count >= frameSize + 4)
+			{
+				// We have a frame
+				HandleBackendFrame(frameSize, BackendRecvBuf.Data + 4);
+				BackendRecvBuf.EraseFromStart(4 + frameSize);
+			}
+		}
+	}
+	else
+	{
+		if (nread == 0)
+			fprintf(Log, "[%d] backend socket closed\n", (int) BackendSock);
+		else
+			fprintf(Log, "[%d] backend socket recv error: %d\n", (int) BackendSock, LastError());
+		closesocket(BackendSock);
+		BackendSock = InvalidSocket;
+	}
+}
+
+void Server::HandleBackendFrame(uint32_t frameSize, const void* frameBuf)
+{
+	auto frame = httpbridge::GetTxFrame(frameBuf);
+	Channel* c = nullptr;
+	for (auto tc : Channels)
+	{
+		if (tc->ChannelID == frame->channel())
+		{
+			c = tc;
+			break;
+		}
+	}
+	if (c == nullptr)
+		return;
+
+	if (frame->frametype() == httpbridge::TxFrameType_Header)
+	{
+		const char* CRLF = "\r\n";
+
+		HttpSendBuf.Count = 0;
+		
+		// status line
+		HttpSendBuf.Write("HTTP/1.1 ", 9);
+		auto statusLine = frame->headers()->Get(0);
+		const char* statusStr = (const char*) statusLine->key()->Data();
+		int statusStrLen = (int) statusLine->key()->size();
+		HttpSendBuf.Write(statusStr, statusStrLen);
+
+		hb::StatusCode status = (hb::StatusCode) uatoi64(statusStr, statusStrLen);
+		HttpSendBuf.WriteStr(StatusString(status));
+		HttpSendBuf.WriteStr(CRLF);
+
+		// headers
+		for (uint32_t i = 0; i < frame->headers()->size(); i++)
+		{
+			auto header = frame->headers()->Get(i);
+			HttpSendBuf.Write(header->key()->Data(), header->key()->size());
+			HttpSendBuf.WriteStr(": ");
+			HttpSendBuf.Write(header->value()->Data(), header->value()->size());
+			HttpSendBuf.WriteStr(CRLF);
+		}
+		HttpSendBuf.WriteStr(CRLF);
+
+		// body
+		HttpSendBuf.Write(frame->body()->Data(), frame->body()->size());
+	}
+	else if (frame->frametype() == httpbridge::TxFrameType_Body)
+	{
+		HttpSendBuf.Write(frame->body()->Data(), frame->body()->size());
+	}
+	else
+	{
+		HTTPBRIDGE_PANIC("Unrecognized frame type");
 	}
 }
 
@@ -328,13 +450,19 @@ void Server::ResetChannel(Channel& c)
 
 void Server::Close()
 {
-	if (ListenSocket != InvalidSocket)
+	CloseSocket(HttpListenSocket);
+	CloseSocket(BackendListenSocket);
+}
+
+void Server::CloseSocket(socket_t& sock)
+{
+	if (sock != InvalidSocket)
 	{
-		int err = closesocket(ListenSocket);
+		int err = closesocket(sock);
 		if (err == ErrSOCKET_ERROR)
-			fprintf(Log, "closesocket() failed: %d\n", LastError());
+			fprintf(Log, "[%d] closesocket() failed: %d\n", (int) sock, LastError());
 	}
-	ListenSocket = InvalidSocket;
+	sock = InvalidSocket;
 }
 
 int Server::LastError()

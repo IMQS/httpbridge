@@ -131,9 +131,68 @@ HTTPBRIDGE_API HTTPBRIDGE_NORETURN_PREFIX void BuiltinTrap() HTTPBRIDGE_NORETURN
 
 	enum StatusCode
 	{
+		Status100_Continue = 100,
+		Status101_Switching_Protocols = 101,
+		Status102_Processing = 102,
 		Status200_OK = 200,
-		Status400_BadRequest = 400,
-		Status503_ServiceUnavailable = 503,
+		Status201_Created = 201,
+		Status202_Accepted = 202,
+		Status203_Non_Authoritative_Information = 203,
+		Status204_No_Content = 204,
+		Status205_Reset_Content = 205,
+		Status206_Partial_Content = 206,
+		Status207_Multi_Status = 207,
+		Status208_Already_Reported = 208,
+		Status226_IM_Used = 226,
+		Status300_Multiple_Choices = 300,
+		Status301_Moved_Permanently = 301,
+		Status302_Found = 302,
+		Status303_See_Other = 303,
+		Status304_Not_Modified = 304,
+		Status305_Use_Proxy = 305,
+		Status307_Temporary_Redirect = 307,
+		Status308_Permanent_Redirect = 308,
+		Status400_Bad_Request = 400,
+		Status401_Unauthorized = 401,
+		Status402_Payment_Required = 402,
+		Status403_Forbidden = 403,
+		Status404_Not_Found = 404,
+		Status405_Method_Not_Allowed = 405,
+		Status406_Not_Acceptable = 406,
+		Status407_Proxy_Authentication_Required = 407,
+		Status408_Request_Timeout = 408,
+		Status409_Conflict = 409,
+		Status410_Gone = 410,
+		Status411_Length_Required = 411,
+		Status412_Precondition_Failed = 412,
+		Status413_Payload_Too_Large = 413,
+		Status414_URI_Too_Long = 414,
+		Status415_Unsupported_Media_Type = 415,
+		Status416_Range_Not_Satisfiable = 416,
+		Status417_Expectation_Failed = 417,
+		Status421_Misdirected_Request = 421,
+		Status422_Unprocessable_Entity = 422,
+		Status423_Locked = 423,
+		Status424_Failed_Dependency = 424,
+		Status425_Unassigned = 425,
+		Status426_Upgrade_Required = 426,
+		Status427_Unassigned = 427,
+		Status428_Precondition_Required = 428,
+		Status429_Too_Many_Requests = 429,
+		Status430_Unassigned = 430,
+		Status431_Request_Header_Fields_Too_Large = 431,
+		Status500_Internal_Server_Error = 500,
+		Status501_Not_Implemented = 501,
+		Status502_Bad_Gateway = 502,
+		Status503_Service_Unavailable = 503,
+		Status504_Gateway_Timeout = 504,
+		Status505_HTTP_Version_Not_Supported = 505,
+		Status506_Variant_Also_Negotiates = 506,
+		Status507_Insufficient_Storage = 507,
+		Status508_Loop_Detected = 508,
+		Status509_Unassigned = 509,
+		Status510_Not_Extended = 510,
+		Status511_Network_Authentication_Required = 511,		
 	};
 
 	HTTPBRIDGE_API bool			Startup();								// Must be called before any other httpbridge functions are called
@@ -145,6 +204,10 @@ HTTPBRIDGE_API HTTPBRIDGE_NORETURN_PREFIX void BuiltinTrap() HTTPBRIDGE_NORETURN
 	HTTPBRIDGE_API void*		Alloc(size_t size, Logger* logger, bool panicOnFail = true);
 	HTTPBRIDGE_API void*		Realloc(void* buf, size_t size, Logger* logger, bool panicOnFail = true);
 	HTTPBRIDGE_API void			Free(void* buf);
+	HTTPBRIDGE_API uint32_t		Read32LE(const void* buf);
+	HTTPBRIDGE_API void			Write32LE(void* buf, uint32_t v);
+	HTTPBRIDGE_API int			U32toa(uint32_t v, char* buf, size_t bufSize);
+	HTTPBRIDGE_API int			U64toa(uint64_t v, char* buf, size_t bufSize);
 
 	class HTTPBRIDGE_API Logger
 	{
@@ -236,6 +299,25 @@ HTTPBRIDGE_API HTTPBRIDGE_NORETURN_PREFIX void BuiltinTrap() HTTPBRIDGE_NORETURN
 				new(&Items[i]) T();
 			Capacity = newCap;
 		}
+	};
+
+	// Byte buffer.
+	class HTTPBRIDGE_API Buffer
+	{
+	public:
+		uint8_t*	Data;
+		size_t		Count;
+		size_t		Capacity;
+
+					Buffer();
+					~Buffer();
+
+		uint8_t*	Preallocate(size_t n);
+		void		EraseFromStart(size_t n);
+		void		Write(const void* buf, size_t n);
+		void		WriteStr(const char* s);
+		void		WriteUInt64(uint64_t v);
+		void		GrowCapacity();
 	};
 
 #ifdef _MSC_VER

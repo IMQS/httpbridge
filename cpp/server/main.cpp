@@ -58,7 +58,7 @@ int main(int argc, char** argv)
 	hb::Server server;
 	server.Handler = &handler;
 	SingleServer = &server;
-	server.ListenAndRun(8080);
+	server.ListenAndRun("127.0.0.1", 8080, 8081);
 	
 	hb::Shutdown();
 

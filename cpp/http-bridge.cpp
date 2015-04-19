@@ -75,11 +75,70 @@ namespace hb
 	{
 		switch (status)
 		{
-		case Status200_OK: return "OK";
-		case Status400_BadRequest: return "Bad Request";
-		case Status503_ServiceUnavailable: return "Service Unavailable";
+		case Status100_Continue:                        return "Continue";
+		case Status101_Switching_Protocols:             return "Switching Protocols";
+		case Status102_Processing:                      return "Processing";
+		case Status200_OK:                              return "OK";
+		case Status201_Created:                         return "Created";
+		case Status202_Accepted:                        return "Accepted";
+		case Status203_Non_Authoritative_Information:   return "Non-Authoritative Information";
+		case Status204_No_Content:                      return "No Content";
+		case Status205_Reset_Content:                   return "Reset Content";
+		case Status206_Partial_Content:                 return "Partial Content";
+		case Status207_Multi_Status:                    return "Multi-Status";
+		case Status208_Already_Reported:                return "Already Reported";
+		case Status226_IM_Used:                         return "IM Used";
+		case Status300_Multiple_Choices:                return "Multiple Choices";
+		case Status301_Moved_Permanently:               return "Moved Permanently";
+		case Status302_Found:                           return "Found";
+		case Status303_See_Other:                       return "See Other";
+		case Status304_Not_Modified:                    return "Not Modified";
+		case Status305_Use_Proxy:                       return "Use Proxy";
+		case Status307_Temporary_Redirect:              return "Temporary Redirect";
+		case Status308_Permanent_Redirect:              return "Permanent Redirect";
+		case Status400_Bad_Request:                     return "Bad Request";
+		case Status401_Unauthorized:                    return "Unauthorized";
+		case Status402_Payment_Required:                return "Payment Required";
+		case Status403_Forbidden:                       return "Forbidden";
+		case Status404_Not_Found:                       return "Not Found";
+		case Status405_Method_Not_Allowed:              return "Method Not Allowed";
+		case Status406_Not_Acceptable:                  return "Not Acceptable";
+		case Status407_Proxy_Authentication_Required:   return "Proxy Authentication Required";
+		case Status408_Request_Timeout:                 return "Request Timeout";
+		case Status409_Conflict:                        return "Conflict";
+		case Status410_Gone:                            return "Gone";
+		case Status411_Length_Required:                 return "Length Required";
+		case Status412_Precondition_Failed:             return "Precondition Failed";
+		case Status413_Payload_Too_Large:               return "Payload Too Large";
+		case Status414_URI_Too_Long:                    return "URI Too Long";
+		case Status415_Unsupported_Media_Type:          return "Unsupported Media Type";
+		case Status416_Range_Not_Satisfiable:           return "Range Not Satisfiable";
+		case Status417_Expectation_Failed:              return "Expectation Failed";
+		case Status421_Misdirected_Request:             return "Misdirected Request";
+		case Status422_Unprocessable_Entity:            return "Unprocessable Entity";
+		case Status423_Locked:                          return "Locked";
+		case Status424_Failed_Dependency:               return "Failed Dependency";
+		case Status425_Unassigned:                      return "Unassigned";
+		case Status426_Upgrade_Required:                return "Upgrade Required";
+		case Status427_Unassigned:                      return "Unassigned";
+		case Status428_Precondition_Required:           return "Precondition Required";
+		case Status429_Too_Many_Requests:               return "Too Many Requests";
+		case Status430_Unassigned:                      return "Unassigned";
+		case Status431_Request_Header_Fields_Too_Large: return "Request Header Fields Too Large";
+		case Status500_Internal_Server_Error:           return "Internal Server Error";
+		case Status501_Not_Implemented:                 return "Not Implemented";
+		case Status502_Bad_Gateway:                     return "Bad Gateway";
+		case Status503_Service_Unavailable:             return "Service Unavailable";
+		case Status504_Gateway_Timeout:                 return "Gateway Timeout";
+		case Status505_HTTP_Version_Not_Supported:      return "HTTP Version Not Supported";
+		case Status506_Variant_Also_Negotiates:         return "Variant Also Negotiates";
+		case Status507_Insufficient_Storage:            return "Insufficient Storage";
+		case Status508_Loop_Detected:                   return "Loop Detected";
+		case Status509_Unassigned:                      return "Unassigned";
+		case Status510_Not_Extended:                    return "Not Extended";
+		case Status511_Network_Authentication_Required: return "Network Authentication Required";
 		}
-		return "Unknown";
+		return "Unrecognized HTTP Status Code";
 	}
 
 	size_t Hash16B(uint64_t pair[2])
@@ -102,8 +161,8 @@ namespace hb
 		return (size_t) (a ^ b);
 	}
 
-	template <size_t buf_size>
-	void utoa(uint32_t v, char (&buf)[buf_size])
+	// Returns the length of the string, excluding the null terminator
+	int U32toa(uint32_t v, char* buf, size_t buf_size)
 	{
 		int i = 0;
 		for (;;)
@@ -111,7 +170,7 @@ namespace hb
 			if (i >= (int) buf_size - 1)
 				break;
 			uint32_t new_v = v / 10;
-			uint32_t mod_v = v % 10;
+			char mod_v = (char) (v % 10);
 			buf[i++] = mod_v + '0';
 			if (new_v == 0)
 				break;
@@ -125,9 +184,49 @@ namespace hb
 			buf[j] = buf[i];
 			buf[i] = t;
 		}
+		return i + 1;
 	}
 
-	// TODO: Remove SleepNano if it's not used by 1.0
+	// Returns the length of the string, excluding the null terminator
+	int U64toa(uint64_t v, char* buf, size_t buf_size)
+	{
+		if (v <= 4294967295u)
+			return U32toa((uint32_t) v, buf, buf_size);
+		int i = 0;
+		for (;;)
+		{
+			if (i >= (int) buf_size - 1)
+				break;
+			uint64_t new_v = v / 10;
+			char mod_v = (char) (v % 10);
+			buf[i++] = mod_v + '0';
+			if (new_v == 0)
+				break;
+			v = new_v;
+		}
+		buf[i] = 0;
+		i--;
+		for (int j = 0; j < i; j++, i--)
+		{
+			char t = buf[j];
+			buf[j] = buf[i];
+			buf[i] = t;
+		}
+		return i + 1;
+	}
+
+	template <size_t buf_size>
+	int u32toa(uint32_t v, char(&buf)[buf_size])
+	{
+		return U32toa(v, buf, buf_size);
+	}
+
+	template <size_t buf_size>
+	int u64toa(uint64_t v, char(&buf)[buf_size])
+	{
+		return U64toa(v, buf, buf_size);
+	}
+
 #ifdef HTTPBRIDGE_PLATFORM_WINDOWS
 	void SleepNano(int64_t nanoseconds)
 	{
@@ -525,6 +624,57 @@ namespace hb
 	//////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 	//////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
+	Buffer::Buffer()
+	{
+	}
+
+	Buffer::~Buffer()
+	{
+	}
+
+	uint8_t* Buffer::Preallocate(size_t n)
+	{
+		while (Count + n > Capacity)
+			GrowCapacity();
+		return Data + Count;
+	}
+
+	void Buffer::EraseFromStart(size_t n)
+	{
+		memmove(Data, Data + n, Count - n);
+	}
+
+	void Buffer::Write(const void* buf, size_t n)
+	{
+		while (Count + n > Capacity)
+			GrowCapacity();
+		memcpy(Data + Count, buf, n);
+		Count += n;
+	}
+	
+	void Buffer::WriteStr(const char* s)
+	{
+		Write(s, strlen(s));
+	}
+
+	void Buffer::WriteUInt64(uint64_t v)
+	{
+		// 18446744073709551615 (max uint64) is 20 characters, and U64toa insists on adding a null terminator
+		while (Count + 21 > Capacity)
+			GrowCapacity();
+		Count += U64toa(v, (char*) (Data + Count), 21);
+	}
+
+	void Buffer::GrowCapacity()
+	{
+		Capacity = Capacity == 0 ? 64 : Capacity * 2;
+		Data = (uint8_t*) Realloc(Data, Capacity, nullptr);
+	}
+
+	//////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+	//////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+	//////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
 	Backend::Backend()
 	{
 	}
@@ -634,7 +784,7 @@ namespace hb
 				if (request.FrameBodyOffset() + request.FrameBodyLength() > canonical->BodyLength())
 				{
 					AnyLog()->Log("Request sent too many body bytes");
-					SendResponse(*canonical, Status400_BadRequest);
+					SendResponse(*canonical, Status400_Bad_Request);
 					CloseWaiting(key);
 				}
 				else
@@ -676,14 +826,14 @@ namespace hb
 		if (request.BodyLength() + (uint64_t) WaitingBufferTotal > (uint64_t) MaxWaitingBufferTotal)
 		{
 			AnyLog()->Log("MaxWaitingBufferTotal exceeded");
-			SendResponse(request, Status503_ServiceUnavailable);
+			SendResponse(request, Status503_Service_Unavailable);
 			return;
 		}
 
 		if (!request.ReallocForEntireBody())
 		{
 			AnyLog()->Log("ReallocForEntireBody failed");
-			SendResponse(request, Status503_ServiceUnavailable);
+			SendResponse(request, Status503_Service_Unavailable);
 			return;
 		}
 
@@ -1121,7 +1271,7 @@ namespace hb
 		std::vector<flatbuffers::Offset<httpbridge::TxHeaderLine>> lines;
 		{
 			char statusStr[4];
-			utoa((uint32_t) Status, statusStr);
+			u32toa((uint32_t) Status, statusStr);
 			auto key = FBB->CreateVector((const uint8_t*) statusStr, 3);
 			auto line = httpbridge::CreateTxHeaderLine(*FBB, key, 0, 0);
 			lines.push_back(line);
@@ -1179,7 +1329,7 @@ namespace hb
 		if (HeaderByName("Content-Length") == nullptr)
 		{
 			char s[11]; // 10 characters needed for 4294967295
-			utoa(BodyLength, s);
+			u32toa(BodyLength, s);
 			WriteHeader("Content-Length", s);
 		}
 
@@ -1206,7 +1356,7 @@ namespace hb
 
 		BufWrite(out, "HTTP/1.1 ", 9);
 		char statusNStr[4];
-		utoa((uint32_t) Status, statusNStr);
+		u32toa((uint32_t) Status, statusNStr);
 		BufWrite(out, statusNStr, 3);
 		BufWrite(out, " ", 1);
 		BufWrite(out, StatusString(Status), strlen(StatusString(Status)));

@@ -43,8 +43,7 @@ Threading model
 
 Limitations
 
-	Maximum of 63 simultaneous connections.
-	In quite a few places, we Sleep instead of waiting as we should.
+	Maximum of 62 simultaneous connections.
 
 */
 class HTTPBRIDGE_API Server
@@ -57,12 +56,16 @@ public:
 	typedef int socket_t;
 	static const socket_t	InvalidSocket = (socket_t) (~0);
 #endif
+
+	// A socket talking HTTP
 	struct Channel
 	{
 		socket_t		Socket = InvalidSocket;
 		void*			Parser = nullptr;
 		hb::Request		Request;
+		uint64_t		ChannelID = 0;
 
+		// Details of the request
 		std::string		Method;
 		std::string		URI;
 		uint64_t		ContentLength = 0;
@@ -72,8 +75,8 @@ public:
 
 	// This limit is inherent to the size of FD_SETSIZE on Windows. I don't know if other OSes have the same limit,
 	// but if you want a real HTTP server, you've come to the wrong place. The total we can select on is 64, but
-	// but we also need one slot to see if we have a new channel that can be accept()'ed.
-	static const int MaxChannels = 63;
+	// but we also need two slots to see if we have a new channel that can be accept()'ed (one for HTTP and one for Backend).
+	static const int MaxChannels = 62;
 
 	IServerHandler*			Handler;
 	std::atomic<uint32_t>	StopSignal;	// When this is non-zero, then ListenAndRun will exit
@@ -82,21 +85,35 @@ public:
 	Server();
 	~Server();
 
-	bool ListenAndRun(uint16_t port);	// If we manage to listen on the port, then this function only returns when Stop() is called
+	// Addr is the address to listen on, such as "127.0.0.1", or "0.0.0.0" to listen on all addresses.
+	// If we manage to listen on both ports, then this function only returns when Stop() is called
+	bool ListenAndRun(const char* addr, uint16_t httpPort, uint16_t backendPort);
+	
 	void Stop()							{ StopSignal = 1;  }
 
 private:
-	socket_t				ListenSocket = InvalidSocket;
+	socket_t				HttpListenSocket = InvalidSocket;
+	socket_t				BackendListenSocket = InvalidSocket;
 	std::thread				AcceptThread;
+	uint64_t				NextChannelID;
 
-	std::vector<Channel*>	Channels;
+	std::vector<Channel*>	Channels;						// HTTP Channels
+	Buffer					HttpSendBuf;					// Buffer of an HTTP response
 
-	void Accept();
+	socket_t				BackendSock = InvalidSocket;	// We only support a single backend connection
+	Buffer					BackendRecvBuf;					// Buffer until we have a whole httpbridge frame
+
+	bool CreateSocketAndListen(socket_t& sock, const char* addr, uint16_t port);
+	void AcceptHttp();
+	void AcceptBackend();
 	void Process();
 	bool ReadFromChannel(Channel& c);	// Returns false if we must close the socket
+	void ReadFromBackend();
+	void HandleBackendFrame(uint32_t frameSize, const void* frameBuf);
 	void HandleRequest(Channel& c);
 	void ResetChannel(Channel& c);		// Reset channel, so that it can serve another request on the same socket
 	void Close();
+	void CloseSocket(socket_t& sock);
 
 	/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 	// http_parser callbacks
