@@ -43,7 +43,7 @@ In order to build your own C++ backend, your need to include the following files
 * `env.bat` (Windows)
 * `. env.sh` (Unix)
 * `go get github.com/google/flatbuffers/go`
-* `go get github.com/benharper123/httpbridge/go`
+* `go get github.com/bmharper/httpbridge/go`
 * `go run cmd/example-server.go`
 * You should now be able to launch the example C++ backend. Once you have both the Go server and C++ backend running,
 you can try `curl localhost:8081`, and you should get a reply.

@@ -3,7 +3,5 @@
 package httpbridge
 
 const (
-	TxFrameTypeHeader = 0
-	TxFrameTypeBody = 1
-	TxFrameTypeAbort = 2
+	TxFrameFlagsFinal = 1
 )

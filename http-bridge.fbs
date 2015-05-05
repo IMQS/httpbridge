@@ -4,13 +4,18 @@ namespace httpbridge;
 // Body frames only contain body data, as well as 'channel' and 'stream'.
 enum TxFrameType : byte {
 	Header = 0,
-	Body
+	Body,
+	Abort
 }
 
 enum TxHttpVersion : byte {
 	Http10 = 0,
 	Http11,
 	Http2
+}
+
+enum TxFrameFlags : byte {
+	Final = 1
 }
 
 // Header lines work as follows:
@@ -29,6 +34,7 @@ table TxHeaderLine {
 table TxFrame {
 	frametype:			TxFrameType = Header;
 	version:			TxHttpVersion = Http10;
+	flags:				ubyte;
 	channel:			ulong;						// A TCP connection
 	stream:				ulong;						// An HTTP/2 stream
 				
@@ -38,8 +44,6 @@ table TxFrame {
 	// The remaining header lines are the proper HTTP headers
 	headers:			[TxHeaderLine];
 
-	body_total_length:	ulong;						// Length of entire request's body (aka Content-Length)
-	body_offset:		ulong;						// Offset into the body of the entire request, where 'body' starts
 	body:				[ubyte];					// A portion of the body (or perhaps the entire thing, if short enough)
 }
 

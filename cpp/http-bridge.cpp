@@ -12,7 +12,15 @@
 #include <netdb.h>
 #include <stdarg.h>
 #include <unistd.h>
-#include <fcntl.h> // TODO Get rid of this at 1.0 if we no longer set sockets to non-blocking
+#include <fcntl.h> // #TODO Get rid of this at 1.0 if we no longer set sockets to non-blocking
+#endif
+
+#ifdef min
+#undef min
+#endif
+
+#ifdef max
+#undef max
 #endif
 
 namespace hb
@@ -227,6 +235,22 @@ namespace hb
 		return U64toa(v, buf, buf_size);
 	}
 
+	uint64_t uatoi64(const char* s, size_t len)
+	{
+		uint64_t v = 0;
+		for (int i = 0; i < len; i++)
+			v = v * 10 + (s[i] - '0');
+		return v;
+	}
+
+	uint64_t uatoi64(const char* s)
+	{
+		uint64_t v = 0;
+		for (int i = 0; s[i]; i++)
+			v = v * 10 + (s[i] - '0');
+		return v;
+	}
+
 #ifdef HTTPBRIDGE_PLATFORM_WINDOWS
 	void SleepNano(int64_t nanoseconds)
 	{
@@ -266,7 +290,7 @@ namespace hb
 		if (b == nullptr)
 		{
 			if (logger != nullptr)
-				logger->Log("httpbridge: Out of memory, about to panic");
+				logger->Logf("Out of memory allocating %llu bytes", (uint64_t) size);
 			if (panicOnFail)
 				HTTPBRIDGE_PANIC("Out of memory (alloc)");
 		}
@@ -279,7 +303,7 @@ namespace hb
 		if (newBuf == nullptr)
 		{
 			if (logger != nullptr)
-				logger->Log("httpbridge: Out of memory, about to panic");
+				logger->Logf("Out of memory allocating %llu bytes", (uint64_t) size);
 			if (panicOnFail)
 				HTTPBRIDGE_PANIC("Out of memory (realloc)");
 			return buf;
@@ -291,6 +315,9 @@ namespace hb
 	{
 		free(buf);
 	}
+
+	template<typename T> T min(T a, T b) { return a < b ? a : b; }
+	template<typename T> T max(T a, T b) { return a < b ? b : a; }
 
 	static void BufWrite(uint8_t*& buf, const void* src, size_t len)
 	{
@@ -491,12 +518,12 @@ namespace hb
 				int e = LastError();
 				if (e == ErrWOULDBLOCK || e == ErrSEND_BUFFER_FULL)
 				{
-					// TODO: This concept here, of having the send buffer full, is untested
+					// #TODO: This concept here, of having the send buffer full, is untested
 					return SendResult_BufferFull;
 				}
 				else
 				{
-					// TODO: test possible results here that are not in fact the socket being closed
+					// #TODO: test possible results here that are not in fact the socket being closed
 					return SendResult_Closed;
 				}
 			}
@@ -521,7 +548,7 @@ namespace hb
 				int e = LastError();
 				if (e == ErrWOULDBLOCK || e == ErrTIMEOUT)
 					return RecvResult_NoData;
-				// TODO: test possible error codes here - there might be some that are recoverable
+				// #TODO: test possible error codes here - there might be some that are recoverable
 				return RecvResult_Closed;
 			}
 			else
@@ -544,7 +571,7 @@ namespace hb
 #endif
 	}
 
-	// TODO: No longer used - get rid of this if that's still true at 1.0
+	// #TODO: No longer used - get rid of this if that's still true at 1.0
 	bool TransportTCP::SetNonBlocking()
 	{
 #ifdef HTTPBRIDGE_PLATFORM_WINDOWS
@@ -630,12 +657,13 @@ namespace hb
 
 	Buffer::~Buffer()
 	{
+		Free(Data);
 	}
-
+	
 	uint8_t* Buffer::Preallocate(size_t n)
 	{
 		while (Count + n > Capacity)
-			GrowCapacity();
+			GrowCapacityOrPanic();
 		return Data + Count;
 	}
 
@@ -647,11 +675,23 @@ namespace hb
 	void Buffer::Write(const void* buf, size_t n)
 	{
 		while (Count + n > Capacity)
-			GrowCapacity();
+			GrowCapacityOrPanic();
 		memcpy(Data + Count, buf, n);
 		Count += n;
 	}
 	
+	bool Buffer::TryWrite(const void* buf, size_t n)
+	{
+		while (Count + n > Capacity)
+		{
+			if (!TryGrowCapacity())
+				return false;
+		}
+		memcpy(Data + Count, buf, n);
+		Count += n;
+		return true;
+	}
+
 	void Buffer::WriteStr(const char* s)
 	{
 		Write(s, strlen(s));
@@ -661,14 +701,77 @@ namespace hb
 	{
 		// 18446744073709551615 (max uint64) is 20 characters, and U64toa insists on adding a null terminator
 		while (Count + 21 > Capacity)
-			GrowCapacity();
+			GrowCapacityOrPanic();
 		Count += U64toa(v, (char*) (Data + Count), 21);
 	}
 
-	void Buffer::GrowCapacity()
+	void Buffer::GrowCapacityOrPanic()
 	{
 		Capacity = Capacity == 0 ? 64 : Capacity * 2;
 		Data = (uint8_t*) Realloc(Data, Capacity, nullptr);
+	}
+
+	bool Buffer::TryGrowCapacity()
+	{
+		auto newCapacity = Capacity == 0 ? 64 : Capacity * 2;
+		auto newData = (uint8_t*) Realloc(Data, newCapacity, nullptr, false);
+		if (newData == nullptr)
+		{
+			return false;
+		}
+		else
+		{
+			Capacity = newCapacity;
+			Data = newData;
+			return true;
+		}
+	}
+
+	//////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+	//////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+	//////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+	InFrame::InFrame()
+	{
+		IsHeader = false;
+		IsLast = false;
+		IsAborted = false;
+		Request = nullptr;
+		Reset();
+	}
+
+	InFrame::~InFrame()
+	{
+		Reset();
+	}
+
+	void InFrame::Reset()
+	{
+		if (Request != nullptr && !Request->BodyBuffer.IsPointerInside(BodyBytes))
+			Free(BodyBytes);
+		
+		if (IsAborted)
+		{
+			Request->DecrementLiveness();
+			Request->DecrementLiveness();
+		}
+		else if (IsLast)
+		{
+			Request->DecrementLiveness();
+		}
+
+		Request = nullptr;
+		IsHeader = false;
+		IsLast = false;
+		IsAborted = false;
+
+		BodyBytes = nullptr;
+		BodyBytesLen = 0;
+	}
+
+	bool InFrame::ResendWhenBodyIsDone()
+	{
+		return Request->Backend->ResendWhenBodyIsDone(*this);
 	}
 
 	//////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -713,14 +816,17 @@ namespace hb
 
 	void Backend::Close()
 	{
-		std::vector<StreamKey> waiting;
-		for (auto& item : WaitingRequests)
-			waiting.push_back(item.first);
+		// Pull items out of CurrentRequests hash map, because we can't iterate over them while deleting them
+		std::vector<Request*> waiting;
+		for (auto& item : CurrentRequests)
+			waiting.push_back(item.second);
 
 		for (auto item : waiting)
-			CloseWaiting(item);
+		{
+			while (!item->DecrementLiveness()) {}
+		}
 
-		HTTPBRIDGE_ASSERT(WaitingBufferTotal == 0);
+		HTTPBRIDGE_ASSERT(BufferedRequestsTotalBytes == 0);
 
 		delete Transport;
 		Transport = nullptr;
@@ -760,103 +866,129 @@ namespace hb
 		return SendResult_All;
 	}
 
-	RecvResult Backend::Recv(Request& request)
+	bool Backend::Recv(InFrame& frame)
 	{
-		RecvResult res = RecvInternal(request);
-		if (res == RecvResult_Data)
+		frame.Reset();
+
+		RecvResult res = RecvInternal(frame);
+		if (res != RecvResult_Data)
+			return false;
+
+		StreamKey streamKey = MakeStreamKey(*frame.Request);
+
+		if (frame.IsHeader)
 		{
-			// Automatically place requests into the 'ResendWhenBodyIsDone' queue
-			if (request.IsHeader() && !request.IsEntireBodyInsideHeader() && request.BodyLength() <= MaxAutoBufferSize)
+			CurrentRequests[streamKey] = frame.Request;
+
+			if (frame.Request->BodyLength == 0)
 			{
-				ResendWhenBodyIsDone(request);
-				return RecvResult_NoData;
+				HTTPBRIDGE_ASSERT(frame.IsLast);
+				//frame.Request->Status = RequestStatus_Received;
+				frame.Request->IsBuffered = true;
+				frame.Request->BodyBuffer.Data = frame.BodyBytes;
+				frame.Request->BodyBuffer.Capacity = frame.BodyBytesLen;
+				frame.Request->BodyBuffer.Count = frame.BodyBytesLen;
+				BufferedRequestsTotalBytes += frame.BodyBytesLen;
+				return true;
 			}
+
+			if (frame.Request->BodyLength <= MaxAutoBufferSize)
+			{
+				// Automatically place requests into the 'ResendWhenBodyIsDone' queue
+				if (ResendWhenBodyIsDone(frame))
+					return true;
+				frame.Reset();
+				return false;
+			}
+
+			return true;
 		}
 
-		if (res == RecvResult_Data)
-		{
-			// Process 'ResendWhenBodyIsDone' requests
-			StreamKey key = { request.Channel(), request.Stream() };
-			auto m = WaitingRequests.find(key);
-			if (m != WaitingRequests.end())
-			{
-				Request* canonical = m->second;
-				if (request.FrameBodyOffset() + request.FrameBodyLength() > canonical->BodyLength())
-				{
-					AnyLog()->Log("Request sent too many body bytes");
-					SendResponse(*canonical, Status400_Bad_Request);
-					CloseWaiting(key);
-				}
-				else
-				{
-					// The (size_t) casts here are safe, because the maximum body length is limited by MaxWaitingBufferTotal, which is type size_t
-					canonical->WriteBodyData((size_t) request.FrameBodyOffset(), (size_t) request.FrameBodyLength(), request.FrameBody());
-					if (request.FrameBodyOffset() + request.FrameBodyLength() == canonical->BodyLength())
-					{
-						std::swap(request, *canonical);
-						CloseWaiting(key);
-						return RecvResult_Data;
-					}
-				}
-				return RecvResult_NoData;
-			}
-		}
-		return res;
+		return true;
 	}
 
-	void Backend::ResendWhenBodyIsDone(Request& request)
+	bool Backend::ResendWhenBodyIsDone(InFrame& frame)
 	{
-		if (request.IsEntireBodyInsideHeader() || !request.IsHeader())
-			LogAndPanic("ResendWhenBodyIsDone called on a request in an illegal state");
+		Request* request = frame.Request;
+
+		if (!frame.IsHeader || frame.IsLast || request->BodyLength == 0)
+			LogAndPanic("ResendWhenBodyIsDone may only be called on the first frame of a request (the header frame), with a non-zero body length");
 
 		// You can't make this decision from a different thread. By the time you have
 		// called ResendWhenBodyIsDone(), the backend thread will already have processed subsequent frames
 		// for this request. You need to make this decision from the same thread that is calling Recv, and
 		// you need to make it before calling Recv again.
+		// #TODO: Why is this here? Surely ALL calls to Backend need to be made from the same thread???
+		// Reply: Probably not. It seems like a very desirable property of Backend's API that we can dispatch
+		// requests off to multiple threads, and that those threads can send their replies whenever they're
+		// done, instead of pushing the synchronization burden onto the user of the API.
 		if (std::this_thread::get_id() != ThreadId)
 			LogAndPanic("ResendWhenBodyIsDone called from a thread other than the Backend thread");
 
-		StreamKey key = { request.Channel(), request.Stream() };
-		if (WaitingRequests.find(key) != WaitingRequests.end())
-			LogAndPanic("ResendWhenBodyIsDone called twice on the same request");
+		StreamKey key = MakeStreamKey(*request);
+		if (CurrentRequests.find(key) == CurrentRequests.end())
+			LogAndPanic("ResendWhenBodyIsDone called on an unknown request");
 
-		// If we run out of memory, or blow our memory budget, then we don't inform the caller.
-		// He can do nothing about it anyway.
+		size_t initialSize = min(InitialBufferSize, (size_t) request->BodyLength);
+		initialSize = max(initialSize, frame.BodyBytesLen);
+		initialSize = max(initialSize, (size_t) 16);
 
-		if (request.BodyLength() + (uint64_t) WaitingBufferTotal > (uint64_t) MaxWaitingBufferTotal)
+		if (initialSize + (uint64_t) BufferedRequestsTotalBytes > (uint64_t) MaxWaitingBufferTotal)
 		{
 			AnyLog()->Log("MaxWaitingBufferTotal exceeded");
-			SendResponse(request, Status503_Service_Unavailable);
-			return;
+			SendResponse(*request, Status503_Service_Unavailable);
+			return false;
 		}
 
-		if (!request.ReallocForEntireBody())
+		request->BodyBuffer.Data = (uint8_t*) Alloc(initialSize, AnyLog(), false);
+		if (request->BodyBuffer.Data == nullptr)
 		{
-			AnyLog()->Log("ReallocForEntireBody failed");
-			SendResponse(request, Status503_Service_Unavailable);
-			return;
+			AnyLog()->Log("Alloc for request buffer failed");
+			SendResponse(*request, Status503_Service_Unavailable);
+			return false;
 		}
 
-		WaitingBufferTotal += (size_t) request.BodyLength();
+		memcpy(request->BodyBuffer.Data, frame.BodyBytes, frame.BodyBytesLen);
+		request->BodyBuffer.Count = frame.BodyBytesLen;
+		request->BodyBuffer.Capacity = initialSize;
+		Free(frame.BodyBytes);
+		frame.BodyBytes = request->BodyBuffer.Data;
 
-		Request* copy = new Request();
-		std::swap(*copy, request);
-		WaitingRequests[key] = copy;
+		BufferedRequestsTotalBytes += (size_t) request->BodyBuffer.Capacity;
+
+		request->IsBuffered = true;
+		return true;
 	}
 
-	RecvResult Backend::RecvInternal(Request& request)
+	void Backend::RequestDestroyed(const StreamKey& key)
+	{
+		auto cr = CurrentRequests.find(key);
+		HTTPBRIDGE_ASSERT(cr != CurrentRequests.end());
+		Request* request = cr->second;
+
+		if (request->IsBuffered)
+		{
+			if (BufferedRequestsTotalBytes < request->BodyBuffer.Capacity)
+				LogAndPanic("BufferedRequestsTotalBytes underflow");
+			BufferedRequestsTotalBytes -= (size_t) request->BodyBuffer.Capacity;
+		}
+
+		CurrentRequests.erase(key);
+	}
+
+	RecvResult Backend::RecvInternal(InFrame& inframe)
 	{
 		if (Transport == nullptr)
 			return RecvResult_Closed;
 
-		// Grow the receive buffer
+		// Grow the receive buffer. We don't expect a frame to be more than 1MB.
 		const size_t initialBufSize = 65536;
-		const size_t maxBufSize = 1024 * 1024;
+		const size_t maxBufSize = 1024 * 1024;	// maxBufSize must be a power of 2, otherwise the overflow condition below will frequently be triggered
 		if (RecvBufCapacity - RecvSize == 0)
 		{
 			if (RecvBufCapacity >= maxBufSize)
 			{
-				AnyLog()->Logf("Server is trying to send us a frame larger than 1MB. Closing connection.");
+				AnyLog()->Logf("Server is trying to send us a frame larger than %d bytes. Closing connection.", (int) maxBufSize);
 				Close();
 				return RecvResult_Closed;
 			}
@@ -882,25 +1014,38 @@ namespace hb
 			if (RecvSize >= frameSize)
 			{
 				// We have a frame to process.
-				const httpbridge::TxFrame* frame = httpbridge::GetTxFrame((uint8_t*) RecvBuf + 4);
-				if (frame->frametype() == httpbridge::TxFrameType_Header)
+				const httpbridge::TxFrame* txframe = httpbridge::GetTxFrame((uint8_t*) RecvBuf + 4);
+				bool goodFrame = true;
+				if (txframe->frametype() == httpbridge::TxFrameType_Header)
 				{
-					UnpackHeader(frame, request);
+					UnpackHeader(txframe, inframe);
+					inframe.IsHeader = true;
+					inframe.IsLast = !!(txframe->flags() & httpbridge::TxFrameFlags_Final);
 				}
-				else if (frame->frametype() == httpbridge::TxFrameType_Body)
+				else if (txframe->frametype() == httpbridge::TxFrameType_Body)
 				{
-					UnpackBody(frame, request);
+					goodFrame = goodFrame && UnpackBody(txframe, inframe);
+					inframe.IsLast = !!(txframe->flags() & httpbridge::TxFrameFlags_Final);
+				}
+				else if (txframe->frametype() == httpbridge::TxFrameType_Abort)
+				{
+					inframe.IsAborted = true;
 				}
 				else
 				{
-					AnyLog()->Logf("Unrecognized frame type %d. Closing connection.", (int) frame->frametype());
+					AnyLog()->Logf("Unrecognized frame type %d. Closing connection.", (int) txframe->frametype());
 					Close();
 					return RecvResult_Closed;
 				}
-				// TODO: get rid of this expensive move by using a circular buffer. AHEM.. one can't use a circular buffer with FlatBuffers.
+				// #TODO: get rid of this expensive move by using a circular buffer. AHEM.. one can't use a circular buffer with FlatBuffers.
 				// But maybe we use something like flip/flopping buffers. ie two buffers that we alternate between.
 				memmove(RecvBuf, RecvBuf + 4 + frameSize, RecvSize - frameSize - 4);
 				RecvSize -= frameSize + 4;
+				if (!goodFrame)
+				{
+					inframe.Reset();
+					return RecvResult_NoData;
+				}
 				return RecvResult_Data;
 			}
 		}
@@ -908,10 +1053,10 @@ namespace hb
 		return RecvResult_NoData;
 	}
 
-	void Backend::UnpackHeader(const httpbridge::TxFrame* frame, Request& request)
+	void Backend::UnpackHeader(const httpbridge::TxFrame* txframe, InFrame& inframe)
 	{
-		auto headers = frame->headers();
-		size_t headerBlockSize = TotalHeaderBlockSize(frame);
+		auto headers = txframe->headers();
+		size_t headerBlockSize = TotalHeaderBlockSize(txframe);
 		uint8_t* hblock = (uint8_t*) Alloc(headerBlockSize, Log);
 
 		auto lines = (Request::HeaderLine*) hblock;								// header lines
@@ -949,14 +1094,63 @@ namespace hb
 		lines[headers->size()].KeyStart = hpos;
 		lines[headers->size()].KeyLen = 0;
 
-		request.InitHeader(this, TranslateVersion(frame->version()), frame->channel(), frame->stream(), frame->body_total_length(), headers->size(), hblock);
+		inframe.Request = new hb::Request();
+		inframe.Request->Initialize(this, TranslateVersion(txframe->version()), txframe->channel(), txframe->stream(), headers->size(), hblock);
 	}
 
-	void Backend::UnpackBody(const httpbridge::TxFrame* frame, Request& request)
+	bool Backend::UnpackBody(const httpbridge::TxFrame* txframe, InFrame& inframe)
 	{
-		void* body = Alloc(frame->body()->size(), Log);
-		memcpy(body, frame->body()->Data(), frame->body()->size());
-		request.InitBody(this, TranslateVersion(frame->version()), frame->channel(), frame->stream(), frame->body_total_length(), frame->body_offset(), frame->body()->size(), body);
+		if (inframe.Request == nullptr)
+		{
+			auto cr = CurrentRequests.find(MakeStreamKey(txframe->channel(), txframe->stream()));
+			if (cr == CurrentRequests.end())
+			{
+				AnyLog()->Logf("Received body bytes for unknown stream [%lld:%lld]", txframe->channel(), txframe->stream());
+				return false;
+			}
+			inframe.Request = cr->second;
+		}
+
+		// Empty body frames are a waste, but not an error. Likely to be the final frame.
+		if (txframe->body() == nullptr)
+			return true;
+
+		if (inframe.Request->IsBuffered)
+		{
+			Buffer& buf = inframe.Request->BodyBuffer;
+			if (buf.Count + inframe.BodyBytesLen > inframe.Request->BodyLength)
+			{
+				AnyLog()->Log("Request sent too many body bytes. Ignoring frame");
+				return false;
+			}
+			// Assume that a buffer realloc is going to grow by buf.Capacity (ie 2x growth).
+			if (buf.Count + txframe->body()->size() > buf.Capacity && BufferedRequestsTotalBytes + buf.Capacity > MaxWaitingBufferTotal)
+			{
+				// TODO: same as below - terminate the stream
+			}
+			auto oldBufCapacity = buf.Capacity;
+			if (!buf.TryWrite(txframe->body()->Data(), txframe->body()->size()))
+			{
+				// TODO: figure out a way to terminate the stream right here, with a 503 response
+				AnyLog()->Log("Failed to allocate memory for body frame");
+				return false;
+			}
+			BufferedRequestsTotalBytes += buf.Capacity - oldBufCapacity;
+			inframe.BodyBytesLen = txframe->body()->size();
+			inframe.BodyBytes = buf.Data + buf.Count - txframe->body()->size();
+			return true;
+		}
+		else
+		{
+			// non-buffered
+			inframe.BodyBytesLen = txframe->body()->size();
+			if (inframe.BodyBytesLen != 0)
+			{
+				inframe.BodyBytes = (uint8_t*) Alloc(inframe.BodyBytesLen, Log);
+				memcpy(inframe.BodyBytes, txframe->body()->Data(), inframe.BodyBytesLen);
+			}
+			return true;
+		}
 	}
 
 	size_t Backend::TotalHeaderBlockSize(const httpbridge::TxFrame* frame)
@@ -991,24 +1185,23 @@ namespace hb
 		HTTPBRIDGE_PANIC(msg);
 	}
 
-	void Backend::SendResponse(const Request& request, StatusCode status)
+	void Backend::SendResponse(Request& request, StatusCode status)
 	{
 		Response response;
 		response.Init(request);
 		response.Status = status;
 		Send(response);
+		request.DecrementLiveness();
 	}
 
-	void Backend::CloseWaiting(StreamKey key)
+	StreamKey Backend::MakeStreamKey(uint64_t channel, uint64_t stream)
 	{
-		Request* request = WaitingRequests[key];
-		
-		if (WaitingBufferTotal < request->BodyLength())
-			LogAndPanic("WaitingBufferTotal underflow");
-		WaitingBufferTotal -= (size_t) request->BodyLength();
+		return StreamKey{ channel, stream };
+	}
 
-		WaitingRequests.erase(key);
-		delete request;
+	StreamKey Backend::MakeStreamKey(const Request& request)
+	{
+		return StreamKey{ request.Channel, request.Stream };
 	}
 
 	//////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -1024,27 +1217,29 @@ namespace hb
 		Free();
 	}
 
-	void Request::InitHeader(hb::Backend* backend, HttpVersion version, uint64_t channel, uint64_t stream, uint64_t bodyTotalLength, int32_t headerCount, const void* headerBlock)
+	void Request::Initialize(hb::Backend* backend, HttpVersion version, uint64_t channel, uint64_t stream, int32_t headerCount, const void* headerBlock)
 	{
-		_IsHeader = true;
-		_Version = version;
-		_Channel = channel;
-		_Stream = stream;
-		_BodyLength = bodyTotalLength;
+		Backend = backend;
+		Version = version;
+		Channel = channel;
+		Stream = stream;
 		_HeaderCount = headerCount;
-		HeaderBlock = (const uint8_t*) headerBlock;
+		_HeaderBlock = (const uint8_t*) headerBlock;
+		const char* contentLength = HeaderByName("Content-Length");
+		if (contentLength != nullptr)
+			BodyLength = (uint64_t) uatoi64(contentLength);
 	}
 
-	void Request::InitBody(hb::Backend* backend, HttpVersion version, uint64_t channel, uint64_t stream, uint64_t bodyTotalLength, uint64_t bodyOffset, uint64_t bodyBytes, const void* body)
+	bool Request::DecrementLiveness()
 	{
-		_IsHeader = false;
-		_Version = version;
-		_Channel = channel;
-		_Stream = stream;
-		_BodyLength = bodyTotalLength;
-		_FrameBodyOffset = bodyOffset;
-		_FrameBodyLength = bodyBytes;
-		_FrameBody = body;
+		_Liveness--;
+		if (_Liveness == 0)
+		{
+			Backend->RequestDestroyed(StreamKey{ Channel, Stream });
+			delete this;
+			return true;
+		}
+		return false;
 	}
 
 	void Request::Reset()
@@ -1053,44 +1248,35 @@ namespace hb
 		*this = Request();
 	}
 
-	HttpVersion Request::Version() const
-	{
-		return _Version;
-	}
-
 	const char* Request::Method() const
 	{
-		if (!IsHeader())
-			return nullptr;
 		// actually the 'key' of header[0]
-		auto lines = (const HeaderLine*) HeaderBlock;
-		return (const char*) (HeaderBlock + lines[0].KeyStart);
+		auto lines = (const HeaderLine*) _HeaderBlock;
+		return (const char*) (_HeaderBlock + lines[0].KeyStart);
 	}
 
 	const char* Request::URI() const
 	{
-		if (!IsHeader())
-			return nullptr;
 		// actually the 'value' of header[0]
-		auto lines = (const HeaderLine*) HeaderBlock;
-		return (const char*) (HeaderBlock + lines[0].KeyStart + lines[0].KeyLen + 1);
+		auto lines = (const HeaderLine*) _HeaderBlock;
+		return (const char*) (_HeaderBlock + lines[0].KeyStart + lines[0].KeyLen + 1);
 	}
 
 	bool Request::HeaderByName(const char* name, size_t& len, const void*& buf, int nth) const
 	{
 		auto nameLen = strlen(name);
 		auto count = HeaderCount() + NumPseudoHeaderLines;
-		auto lines = (const HeaderLine*) HeaderBlock;
+		auto lines = (const HeaderLine*) _HeaderBlock;
 		for (int32_t i = NumPseudoHeaderLines; i < count; i++)
 		{
-			const uint8_t* bKey = HeaderBlock + lines[i].KeyStart;
+			const uint8_t* bKey = _HeaderBlock + lines[i].KeyStart;
 			if (memcmp(bKey, name, nameLen) == 0)
 				nth--;
 
 			if (nth == -1)
 			{
-				buf = HeaderBlock + (lines[i].KeyStart + lines[i].KeyLen);
-				len = lines[i + 1].KeyStart - (lines[i].KeyStart + lines[i].KeyLen);
+				buf = _HeaderBlock + (lines[i].KeyStart + lines[i].KeyLen + 1);
+				len = lines[i + 1].KeyStart - 1 - (lines[i].KeyStart + lines[i].KeyLen + 1);
 				return true;
 			}
 		}
@@ -1119,11 +1305,11 @@ namespace hb
 		else
 		{
 			index += NumPseudoHeaderLines;
-			auto lines = (const HeaderLine*) HeaderBlock;
+			auto lines = (const HeaderLine*) _HeaderBlock;
 			keyLen = lines[index].KeyLen;
-			key = (const char*) (HeaderBlock + lines[index].KeyStart);
+			key = (const char*) (_HeaderBlock + lines[index].KeyStart);
 			valLen = lines[index + 1].KeyStart - (lines[index].KeyStart + lines[index].KeyLen);
-			val = (const char*) (HeaderBlock + lines[index].KeyStart + lines[index].KeyLen + 1);
+			val = (const char*) (_HeaderBlock + lines[index].KeyStart + lines[index].KeyLen + 1);
 		}
 	}
 
@@ -1133,36 +1319,9 @@ namespace hb
 		HeaderAt(index, keyLen, key, valLen, val);
 	}
 
-	void Request::ResendWhenBodyIsDone()
-	{
-		_Backend->ResendWhenBodyIsDone(*this);
-	}
-
-	bool Request::IsEntireBodyInsideHeader() const
-	{
-		return IsHeader() && BodyLength() == FrameBodyLength();
-	}
-
-	void Request::WriteBodyData(size_t offset, size_t len, const void* data)
-	{
-		HTTPBRIDGE_ASSERT((uint64_t) offset + (uint64_t) len <= _BodyLength);
-
-		memcpy((uint8_t*) _FrameBody + offset, data, len);
-	}
-
-	bool Request::ReallocForEntireBody()
-	{
-		void* newBody = Realloc((void*) _FrameBody, (size_t) BodyLength(), _Backend->Log, false);
-		if (newBody == nullptr)
-			return false;
-		_FrameBody = newBody;
-		return true;
-	}
-
 	void Request::Free()
 	{
-		hb::Free((void*) HeaderBlock);
-		hb::Free((void*) _FrameBody);
+		hb::Free((void*) _HeaderBlock);
 	}
 
 	//////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -1183,9 +1342,9 @@ namespace hb
 
 	void Response::Init(const Request& request)
 	{
-		Version = request.Version();
-		Stream = request.Stream();
-		Channel = request.Channel();
+		Version = request.Version;
+		Stream = request.Stream;
+		Channel = request.Channel;
 	}
 	
 	void Response::WriteHeader(const char* key, const char* value)
@@ -1293,8 +1452,6 @@ namespace hb
 
 		httpbridge::TxFrameBuilder frame(*FBB);
 		frame.add_body(BodyOffset);
-		frame.add_body_offset(0);
-		frame.add_body_total_length(BodyLength);
 		frame.add_headers(linesVector);
 		frame.add_channel(Channel);
 		frame.add_stream(Stream);

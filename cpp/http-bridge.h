@@ -45,11 +45,14 @@ TODO
 1. Support more advanced features of HTTP/2 such as PUSH frames.
 2. Support streaming responses out, instead of being forced to sent the entire response at once
 	(this is a C++ implementation issue, not a protocol issue).
+3. Figure out in which conditions a request will have a body but no Content-Length header. Right now
+	we're a bit ambivalent on this one, for example we copy Content-Length into Request.BodyLength,
+	but then we rely on the Server to send us a flag indicating that a frame is Final.
 
 ------------------------------------------------------------------------------------------------
 
-t2-output\win64-2013-debug-default\flatc -c -o third_party\http-bridge -b third_party\http-bridge\http-bridge.fbs
-t2-output\win64-2013-debug-default\flatc -g -o third_party\http-bridge\goserver\src -b third_party\http-bridge\http-bridge.fbs
+c:\dev\head\otaku\t2-output\win64-2013-debug-default\flatc -c -o cpp -b http-bridge.fbs
+c:\dev\head\otaku\t2-output\win64-2013-debug-default\flatc -g -o go -b http-bridge.fbs
 */
 
 #include <stdint.h>
@@ -106,21 +109,28 @@ HTTPBRIDGE_API HTTPBRIDGE_NORETURN_PREFIX void BuiltinTrap() HTTPBRIDGE_NORETURN
 	class Logger;
 	class Request;
 	class Response;
+	class InFrame;
 	class HeaderCacheRecv;		// Implemented in http-bridge.cpp
 
 	enum SendResult
 	{
 		SendResult_All,			// All of the data was sent
 		SendResult_BufferFull,	// Some of the data might have been sent, but the buffer is now full.
-		SendResult_Closed		// The transport channel has been closed by the OS
+		SendResult_Closed,		// The transport channel has been closed by the OS
 	};
 
 	enum RecvResult
 	{
 		RecvResult_NoData,		// Nothing read
 		RecvResult_Data,		// Some data has been read.
-		RecvResult_Closed		// The transport channel has been closed by the OS
+		RecvResult_Closed,		// The transport channel has been closed by the OS
 	};
+
+	//enum RequestStatus
+	//{
+	//	RequestStatus_Receiving,	// Body is busy being received
+	//	RequestStatus_Received,		// Entire body has been received
+	//};
 
 	enum HttpVersion
 	{
@@ -208,6 +218,8 @@ HTTPBRIDGE_API HTTPBRIDGE_NORETURN_PREFIX void BuiltinTrap() HTTPBRIDGE_NORETURN
 	HTTPBRIDGE_API void			Write32LE(void* buf, uint32_t v);
 	HTTPBRIDGE_API int			U32toa(uint32_t v, char* buf, size_t bufSize);
 	HTTPBRIDGE_API int			U64toa(uint64_t v, char* buf, size_t bufSize);
+	HTTPBRIDGE_API uint64_t		uatoi64(const char* s, size_t len);
+	HTTPBRIDGE_API uint64_t		uatoi64(const char* s);
 
 	class HTTPBRIDGE_API Logger
 	{
@@ -305,19 +317,22 @@ HTTPBRIDGE_API HTTPBRIDGE_NORETURN_PREFIX void BuiltinTrap() HTTPBRIDGE_NORETURN
 	class HTTPBRIDGE_API Buffer
 	{
 	public:
-		uint8_t*	Data;
-		size_t		Count;
-		size_t		Capacity;
+		uint8_t*	Data = nullptr;
+		size_t		Count = 0;
+		size_t		Capacity = 0;
 
 					Buffer();
 					~Buffer();
 
 		uint8_t*	Preallocate(size_t n);
 		void		EraseFromStart(size_t n);
-		void		Write(const void* buf, size_t n);
-		void		WriteStr(const char* s);
-		void		WriteUInt64(uint64_t v);
-		void		GrowCapacity();
+		void		Write(const void* buf, size_t n);		// Uses GrowCapacityOrPanic()
+		bool		TryWrite(const void* buf, size_t n);	// Returns false if allocation fails
+		void		WriteStr(const char* s);				// Uses GrowCapacityOrPanic()
+		void		WriteUInt64(uint64_t v);				// Uses GrowCapacityOrPanic()
+		void		GrowCapacityOrPanic();
+		bool		TryGrowCapacity();						// Returns false if allocation fails
+		bool		IsPointerInside(const void* p) const { return ((size_t) ((uint8_t*) p - Data)) < Capacity; }
 	};
 
 #ifdef _MSC_VER
@@ -347,13 +362,6 @@ namespace hb
 {
 	typedef std::unordered_map<StreamKey, Request*> StreamToRequestMap;
 
-	// A frame received from the client
-	class HTTPBRIDGE_API FrameIn
-	{
-	public:
-
-	};
-
 	/* A backend that wants to receive HTTP/2 requests
 	To connect to an upstream http-bridge server, call Connect("tcp", "host:port")
 	*/
@@ -361,8 +369,18 @@ namespace hb
 	{
 	public:
 		Logger*				Log = nullptr;								// This is not owned by Backend. Backend will never delete this.
-		size_t				MaxWaitingBufferTotal = 256 * 1024 * 1024;	// Maximum number of bytes that will be allocated for 'ResendWhenBodyIsDone' requests. Total shared by all pending requests.
-		size_t				MaxAutoBufferSize = 16 * 1024 * 1024;		// Maximum size of a single request who's body will be automatically sent through 'ResendWhenBodyIsDone'. Set to zero to disable.
+		
+		// Maximum number of bytes that will be allocated for 'ResendWhenBodyIsDone' requests. Total shared by all pending requests.
+		size_t				MaxWaitingBufferTotal = 1024 * 1024 * 1024;
+		
+		// Maximum size of a single request who's body will be automatically sent through 'ResendWhenBodyIsDone'. Set to zero to disable.
+		// If a request is smaller or equal to MaxAutoBufferSize, but our total buffer quota (MaxWaitingBufferTotal) has been exceeded by the queue, then
+		// the request will return with a Status503_Service_Unavailable.
+		size_t				MaxAutoBufferSize = 16 * 1024 * 1024;		
+
+		// Initial size of receiving buffer, per request. If this value is large, then it becomes trivial for an attacker to cause your server
+		// to exhaust all of it's memory pool, without transmitting much data.
+		size_t				InitialBufferSize = 4096;
 
 							Backend();
 							~Backend();							// This calls Close()
@@ -370,8 +388,9 @@ namespace hb
 		bool				IsConnected();
 		void				Close();
 		SendResult			Send(Response& response);
-		RecvResult			Recv(Request& request);
-		void				ResendWhenBodyIsDone(Request& request);	// Called by Request.ResendWhenBodyIsDone(). Panics if Request.IsEntireBodyInsideHeader() is false, or not a HEADER frame.
+		bool				Recv(InFrame& frame);						// Returns true if a frame was received
+		bool				ResendWhenBodyIsDone(InFrame& frame);		// Called by InFrame.ResendWhenBodyIsDone(). Returns false if out of memory.
+		void				RequestDestroyed(const StreamKey& key);		// Intended to be called ONLY by Request's destructor.
 
 	private:
 		hb::HeaderCacheRecv* HeaderCacheRecv = nullptr;
@@ -381,24 +400,32 @@ namespace hb
 		size_t				RecvBufCapacity = 0;
 		size_t				RecvSize = 0;
 		std::thread::id		ThreadId;
-		StreamToRequestMap	WaitingRequests;		// Requests waiting to have all of their body transferred
-		size_t				WaitingBufferTotal = 0;	// Total number of body bytes allocated for "WaitingRequests"
+		StreamToRequestMap	CurrentRequests;
+		size_t				BufferedRequestsTotalBytes = 0;		// Total number of body bytes allocated for "BufferedRequests"
 
-		RecvResult			RecvInternal(Request& request);
+		RecvResult			RecvInternal(InFrame& inframe);
 		Logger*				AnyLog();
 		bool				Connect(ITransport* transport, const char* addr);
-		void				UnpackHeader(const httpbridge::TxFrame* frame, Request& request);
-		void				UnpackBody(const httpbridge::TxFrame* frame, Request& request);
+		void				UnpackHeader(const httpbridge::TxFrame* txframe, InFrame& inframe);
+		bool				UnpackBody(const httpbridge::TxFrame* txframe, InFrame& inframe);		// Returns false if there is a protocol violation
 		size_t				TotalHeaderBlockSize(const httpbridge::TxFrame* frame);
 		void				LogAndPanic(const char* msg);
-		void				SendResponse(const Request& request, StatusCode status);
-		void				CloseWaiting(StreamKey key);
+		void				SendResponse(Request& request, StatusCode status);
+		static StreamKey	MakeStreamKey(uint64_t channel, uint64_t stream);
+		static StreamKey	MakeStreamKey(const Request& request);
 	};
 
 	/* HTTP request
 	Note that header keys and values are always null terminated. The HTTP/2 spec allows headers
 	to contain arbitrary binary data, so you may be missing something by not using the header accessor functions
 	that allow you to read through null characters, but that's your choice.
+
+	The lifetime of a Request object is determined by a liveness count. The liveness count starts out at 2.
+	Liveness is decremented as follows:
+		* When the frame marked as IsLast is destroyed, liveness is decremented by one.
+		* When the response is sent, liveness is decremented by one.
+		* When the frame marked as IsAborted is destroyed, liveness is decremented by two (because aborted streams never get a response).
+	If liveness drops to zero, the request object is destroyed, and it is removed from Backend's table of current requests.
 	*/
 	class HTTPBRIDGE_API Request
 	{
@@ -419,26 +446,30 @@ namespace hb
 			uint32_t	KeyLen;
 		};
 
+		hb::Backend*			Backend = nullptr;
+		//hb::RequestStatus		Status = RequestStatus_Receiving;
+		bool					IsBuffered = false;
+		HttpVersion				Version = HttpVersion10;
+		uint64_t				Channel = 0;
+		uint64_t				Stream = 0;
+		uint64_t				BodyLength = 0;			// The total length of the body of this request. This is simply a cache of the Content-Length header.
+		hb::Buffer				BodyBuffer;				// If IsBuffered = true, then BodyBuffer stores the entire body
+
 								Request();
 								~Request();
 
 		// Set a header. The Request object now owns headerBlock, and will Free() it in the destructor
-		void					InitHeader(Backend* backend, HttpVersion version, uint64_t channel, uint64_t stream, uint64_t bodyTotalLength, int32_t headerCount, const void* headerBlock);
+		// The header block must have a terminal pair in inside in order to make iteration easy.
+		void					Initialize(hb::Backend* backend, HttpVersion version, uint64_t channel, uint64_t stream, int32_t headerCount, const void* headerBlock);
 
-		// Set a piece of the body. The Request object now owns body, and will Free() it in the destructor
-		void					InitBody(Backend* backend, HttpVersion version, uint64_t channel, uint64_t stream, uint64_t bodyTotalLength, uint64_t bodyOffset, uint64_t bodyBytes, const void* body);
+		// Returns true if the Request object was destroyed
+		bool					DecrementLiveness();
 
 		// Free any memory that we own, and then initialize to a newly-constructed Request
 		void					Reset();
 
-		hb::Backend*			Backend() const		{ return _Backend; }
-		bool					IsHeader() const	{ return _IsHeader; }		// If not header, then only body
-		uint64_t				Channel() const		{ return _Channel; }
-		uint64_t				Stream() const		{ return _Stream; }
-
-		HttpVersion				Version() const;	// Only valid on a HEADER frame
-		const char*				Method() const;		// Only valid on a HEADER frame, returns the method, such as GET or POST
-		const char*				URI() const;		// Only valid on a HEADER frame, returns the URI of the request
+		const char*				Method() const;		// Returns the method, such as GET or POST
+		const char*				URI() const;		// Returns the URI of the request
 
 		// Returns the number of headers
 		int32_t					HeaderCount() const { return _HeaderCount == 0 ? 0 : _HeaderCount - NumPseudoHeaderLines; }
@@ -463,47 +494,38 @@ namespace hb
 		// Using this function means you cannot consume headers with embedded null characters in them, but a lot of the time that's OK.
 		void					HeaderAt(int32_t index, const char*& key, const char*& val) const;
 
-		// The body data in this frame
-		const void*				FrameBody() const { return _FrameBody; }
-
-		// The number of body bytes in this frame
-		uint64_t				FrameBodyLength() const { return _FrameBodyLength; }
-
-		// The offset from the start of the entire request's body, to the start of this frame's body bytes.
-		uint64_t				FrameBodyOffset() const { return _FrameBodyOffset; }
-
-		// The total length of the body of this request
-		uint64_t				BodyLength() const { return _BodyLength; }
-
-		// Put this request back in the queue, and call us again when the client has sent all of the request body.
-		// If IsEntireBodyInsideHeader() is true, or this is not a HEADER frame, then this function panics.
-		void					ResendWhenBodyIsDone();
-
-		// Returns true if this is a header frame, and the entire body is contained inside it (or there is no body)
-		bool					IsEntireBodyInsideHeader() const;
-
-		// Called by Backend when it is filling a buffer waiting in the queue, after having called ResendWhenBodyIsDone().
-		void					WriteBodyData(size_t offset, size_t len, const void* data);
-
-		// Reallocate body buffer so that it can hold the entire body. This is called by Backend at the start of ResendWhenBodyIsDone().
-		// This is one of the few functions that returns false if a memory allocation fails.
-		bool					ReallocForEntireBody();
-
 	private:
 		static const int		NumPseudoHeaderLines = 1;
-		hb::Backend*			_Backend = nullptr;
-		bool					_IsHeader = false;			// else Body
-		HttpVersion				_Version = HttpVersion10;
-		uint64_t				_Channel = 0;
-		uint64_t				_Stream = 0;
 		int32_t					_HeaderCount = 0;
-		const uint8_t*			HeaderBlock = nullptr;		// First HeaderLine[] array and then the headers themselves
-		const void*				_FrameBody = nullptr;
-		uint64_t				_FrameBodyOffset = 0;
-		uint64_t				_FrameBodyLength = 0;
-		uint64_t				_BodyLength = 0;
+		const uint8_t*			_HeaderBlock = nullptr;		// First HeaderLine[] array and then the headers themselves
+		int						_Liveness = 2;				// A reference count on Request.
 
 		void					Free();
+	};
+
+	// A frame received from the client
+	class HTTPBRIDGE_API InFrame
+	{
+	public:
+		hb::Request*	Request;
+		bool			IsHeader;			// Is this the first frame of the request? Note that IsHeader and IsLast are both true for a request with an empty body.
+		bool			IsLast;				// Is this the last frame of the request? If true, then the request is deleted by the frame's destructor.
+		bool			IsAborted;			// True if the stream has been aborted (ie the browser connection timed out, etc). Such a frame contains no data, and IsLast is guaranteed to be false.
+
+		uint8_t*		BodyBytes;			// Body bytes in this frame
+		size_t			BodyBytesLen;		// Length of BodyBytes
+
+		InFrame();
+		~InFrame();
+
+		void	Reset();	// Calls destructor and re-initializes
+
+		// Calls Request->Backend->ResentWhenBodyIsDone(this)
+		bool	ResendWhenBodyIsDone();
+
+	private:
+		InFrame(const InFrame&) = delete;
+		InFrame& operator= (const InFrame&) = delete;
 	};
 
 	/* HTTP Response

@@ -31,6 +31,14 @@ func (rcv *TxHeaderLine) KeyLength() int {
 	return 0
 }
 
+func (rcv *TxHeaderLine) KeyBytes() []byte {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(4))
+	if o != 0 {
+		return rcv._tab.ByteVector(o + rcv._tab.Pos)
+	}
+	return nil
+}
+
 func (rcv *TxHeaderLine) Value(j int) byte {
 	o := flatbuffers.UOffsetT(rcv._tab.Offset(6))
 	if o != 0 {
@@ -46,6 +54,14 @@ func (rcv *TxHeaderLine) ValueLength() int {
 		return rcv._tab.VectorLen(o)
 	}
 	return 0
+}
+
+func (rcv *TxHeaderLine) ValueBytes() []byte {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(6))
+	if o != 0 {
+		return rcv._tab.ByteVector(o + rcv._tab.Pos)
+	}
+	return nil
 }
 
 func (rcv *TxHeaderLine) Id() uint16 {

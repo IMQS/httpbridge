@@ -26,14 +26,6 @@ static const int		ErrSOCKET_ERROR = -1;
 // one millisecond, in nanoseconds
 static const int MillisecondNS = 1000 * 1000;
 
-static uint64_t uatoi64(const char* s, size_t len)
-{
-	uint64_t v = 0;
-	for (int i = 0; i < len; i++)
-		v = v * 10 + s[i];
-	return v;
-}
-
 // We use this wrapper function to keep http_parser out of the global namespace
 static http_parser* GetParser(Server::Channel& c)
 {
@@ -156,7 +148,7 @@ void Server::cb_header_done(void *data, const char *at, size_t length)
 
 	HTTPBRIDGE_ASSERT(bufpos == total);
 
-	c->Request.InitHeader(nullptr, c->Version, 0, 0, c->ContentLength, (int32_t) c->Headers.size() + 1, hblock);
+	c->Request.Initialize(nullptr, c->Version, 0, 0, c->ContentLength, (int32_t) c->Headers.size() + 1, hblock);
 }
 
 

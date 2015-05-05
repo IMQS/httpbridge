@@ -13,11 +13,12 @@ struct TxFrame;
 
 enum TxFrameType {
   TxFrameType_Header = 0,
-  TxFrameType_Body = 1
+  TxFrameType_Body = 1,
+  TxFrameType_Abort = 2
 };
 
 inline const char **EnumNamesTxFrameType() {
-  static const char *names[] = { "Header", "Body", nullptr };
+  static const char *names[] = { "Header", "Body", "Abort", nullptr };
   return names;
 }
 
@@ -35,6 +36,17 @@ inline const char **EnumNamesTxHttpVersion() {
 }
 
 inline const char *EnumNameTxHttpVersion(TxHttpVersion e) { return EnumNamesTxHttpVersion()[e]; }
+
+enum TxFrameFlags {
+  TxFrameFlags_Final = 1
+};
+
+inline const char **EnumNamesTxFrameFlags() {
+  static const char *names[] = { "Final", nullptr };
+  return names;
+}
+
+inline const char *EnumNameTxFrameFlags(TxFrameFlags e) { return EnumNamesTxFrameFlags()[e - TxFrameFlags_Final]; }
 
 struct TxHeaderLine FLATBUFFERS_FINAL_CLASS : private flatbuffers::Table {
   const flatbuffers::Vector<uint8_t> *key() const { return GetPointer<const flatbuffers::Vector<uint8_t> *>(4); }
@@ -79,24 +91,22 @@ inline flatbuffers::Offset<TxHeaderLine> CreateTxHeaderLine(flatbuffers::FlatBuf
 struct TxFrame FLATBUFFERS_FINAL_CLASS : private flatbuffers::Table {
   TxFrameType frametype() const { return static_cast<TxFrameType>(GetField<int8_t>(4, 0)); }
   TxHttpVersion version() const { return static_cast<TxHttpVersion>(GetField<int8_t>(6, 0)); }
-  uint64_t channel() const { return GetField<uint64_t>(8, 0); }
-  uint64_t stream() const { return GetField<uint64_t>(10, 0); }
-  const flatbuffers::Vector<flatbuffers::Offset<TxHeaderLine>> *headers() const { return GetPointer<const flatbuffers::Vector<flatbuffers::Offset<TxHeaderLine>> *>(12); }
-  uint64_t body_total_length() const { return GetField<uint64_t>(14, 0); }
-  uint64_t body_offset() const { return GetField<uint64_t>(16, 0); }
-  const flatbuffers::Vector<uint8_t> *body() const { return GetPointer<const flatbuffers::Vector<uint8_t> *>(18); }
+  uint8_t flags() const { return GetField<uint8_t>(8, 0); }
+  uint64_t channel() const { return GetField<uint64_t>(10, 0); }
+  uint64_t stream() const { return GetField<uint64_t>(12, 0); }
+  const flatbuffers::Vector<flatbuffers::Offset<TxHeaderLine>> *headers() const { return GetPointer<const flatbuffers::Vector<flatbuffers::Offset<TxHeaderLine>> *>(14); }
+  const flatbuffers::Vector<uint8_t> *body() const { return GetPointer<const flatbuffers::Vector<uint8_t> *>(16); }
   bool Verify(flatbuffers::Verifier &verifier) const {
     return VerifyTableStart(verifier) &&
            VerifyField<int8_t>(verifier, 4 /* frametype */) &&
            VerifyField<int8_t>(verifier, 6 /* version */) &&
-           VerifyField<uint64_t>(verifier, 8 /* channel */) &&
-           VerifyField<uint64_t>(verifier, 10 /* stream */) &&
-           VerifyField<flatbuffers::uoffset_t>(verifier, 12 /* headers */) &&
+           VerifyField<uint8_t>(verifier, 8 /* flags */) &&
+           VerifyField<uint64_t>(verifier, 10 /* channel */) &&
+           VerifyField<uint64_t>(verifier, 12 /* stream */) &&
+           VerifyField<flatbuffers::uoffset_t>(verifier, 14 /* headers */) &&
            verifier.Verify(headers()) &&
            verifier.VerifyVectorOfTables(headers()) &&
-           VerifyField<uint64_t>(verifier, 14 /* body_total_length */) &&
-           VerifyField<uint64_t>(verifier, 16 /* body_offset */) &&
-           VerifyField<flatbuffers::uoffset_t>(verifier, 18 /* body */) &&
+           VerifyField<flatbuffers::uoffset_t>(verifier, 16 /* body */) &&
            verifier.Verify(body()) &&
            verifier.EndTable();
   }
@@ -107,16 +117,15 @@ struct TxFrameBuilder {
   flatbuffers::uoffset_t start_;
   void add_frametype(TxFrameType frametype) { fbb_.AddElement<int8_t>(4, static_cast<int8_t>(frametype), 0); }
   void add_version(TxHttpVersion version) { fbb_.AddElement<int8_t>(6, static_cast<int8_t>(version), 0); }
-  void add_channel(uint64_t channel) { fbb_.AddElement<uint64_t>(8, channel, 0); }
-  void add_stream(uint64_t stream) { fbb_.AddElement<uint64_t>(10, stream, 0); }
-  void add_headers(flatbuffers::Offset<flatbuffers::Vector<flatbuffers::Offset<TxHeaderLine>>> headers) { fbb_.AddOffset(12, headers); }
-  void add_body_total_length(uint64_t body_total_length) { fbb_.AddElement<uint64_t>(14, body_total_length, 0); }
-  void add_body_offset(uint64_t body_offset) { fbb_.AddElement<uint64_t>(16, body_offset, 0); }
-  void add_body(flatbuffers::Offset<flatbuffers::Vector<uint8_t>> body) { fbb_.AddOffset(18, body); }
+  void add_flags(uint8_t flags) { fbb_.AddElement<uint8_t>(8, flags, 0); }
+  void add_channel(uint64_t channel) { fbb_.AddElement<uint64_t>(10, channel, 0); }
+  void add_stream(uint64_t stream) { fbb_.AddElement<uint64_t>(12, stream, 0); }
+  void add_headers(flatbuffers::Offset<flatbuffers::Vector<flatbuffers::Offset<TxHeaderLine>>> headers) { fbb_.AddOffset(14, headers); }
+  void add_body(flatbuffers::Offset<flatbuffers::Vector<uint8_t>> body) { fbb_.AddOffset(16, body); }
   TxFrameBuilder(flatbuffers::FlatBufferBuilder &_fbb) : fbb_(_fbb) { start_ = fbb_.StartTable(); }
   TxFrameBuilder &operator=(const TxFrameBuilder &);
   flatbuffers::Offset<TxFrame> Finish() {
-    auto o = flatbuffers::Offset<TxFrame>(fbb_.EndTable(start_, 8));
+    auto o = flatbuffers::Offset<TxFrame>(fbb_.EndTable(start_, 7));
     return o;
   }
 };
@@ -124,19 +133,17 @@ struct TxFrameBuilder {
 inline flatbuffers::Offset<TxFrame> CreateTxFrame(flatbuffers::FlatBufferBuilder &_fbb,
    TxFrameType frametype = TxFrameType_Header,
    TxHttpVersion version = TxHttpVersion_Http10,
+   uint8_t flags = 0,
    uint64_t channel = 0,
    uint64_t stream = 0,
    flatbuffers::Offset<flatbuffers::Vector<flatbuffers::Offset<TxHeaderLine>>> headers = 0,
-   uint64_t body_total_length = 0,
-   uint64_t body_offset = 0,
    flatbuffers::Offset<flatbuffers::Vector<uint8_t>> body = 0) {
   TxFrameBuilder builder_(_fbb);
-  builder_.add_body_offset(body_offset);
-  builder_.add_body_total_length(body_total_length);
   builder_.add_stream(stream);
   builder_.add_channel(channel);
   builder_.add_body(body);
   builder_.add_headers(headers);
+  builder_.add_flags(flags);
   builder_.add_version(version);
   builder_.add_frametype(frametype);
   return builder_.Finish();

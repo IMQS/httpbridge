@@ -123,10 +123,12 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	responseChan := s.registerStream(channel, stream)
 	defer s.unregisterStream(channel, stream)
 
-	if !s.sendHeaderFrame(w, req, backend, channel, stream) {
+	hasBody := req.Body != nil && req.ContentLength != 0
+
+	if !s.sendHeaderFrame(w, req, backend, channel, stream, hasBody) {
 		return
 	}
-	if req.Body != nil && req.ContentLength != 0 {
+	if hasBody {
 		if !s.sendBody(w, req, backend, channel, stream) {
 			return
 		}
@@ -139,7 +141,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	s.sendResponse(w, req, backend, channel, stream, responseChan)
 }
 
-func (s *Server) sendHeaderFrame(w http.ResponseWriter, req *http.Request, backend *backendConnection, channel, stream uint64) bool {
+func (s *Server) sendHeaderFrame(w http.ResponseWriter, req *http.Request, backend *backendConnection, channel, stream uint64, hasBody bool) bool {
 	builder := flatbuffers.NewBuilder(0)
 
 	// Headers
@@ -172,10 +174,16 @@ func (s *Server) sendHeaderFrame(w http.ResponseWriter, req *http.Request, backe
 	}
 	headers := builder.EndVector(len(header_lines))
 
+	flags := byte(0)
+	if !hasBody {
+		flags |= TxFrameFlagsFinal
+	}
+
 	// Frame
 	TxFrameStart(builder)
 	TxFrameAddFrametype(builder, TxFrameTypeHeader)
 	TxFrameAddVersion(builder, makeTxHttpVersionNumber(req))
+	TxFrameAddFlags(builder, flags)
 	TxFrameAddChannel(builder, channel)
 	TxFrameAddStream(builder, stream)
 	TxFrameAddHeaders(builder, headers)
@@ -194,37 +202,42 @@ func (s *Server) sendBody(w http.ResponseWriter, req *http.Request, backend *bac
 	// up your front-end's memory with buffers). If the HTTP process and the backend are on the same machine, then I'm guessing you'd
 	// want a buffer quite a bit bigger than an ethernet frame.
 	static_buf := [4096]byte{}
-	buf := static_buf[:]
-	offset := uint64(0)
 	eof := false
 
+	s.Log.Printf("sendBody START")
+
 	for !eof {
+		buf := static_buf[:]
 		nread, err := req.Body.Read(buf)
 		eof = err == io.EOF
 		if err != nil && !eof {
+			// TODO: Send an ABORT frame
 			http.Error(w, fmt.Sprintf("Error reading body for backend %v (%v)", backend.id, err), http.StatusGatewayTimeout)
 			return false
 		}
 
-		builder := flatbuffers.NewBuilder(nread + 100)
+		s.Log.Printf("sendBody %v", nread)
 
+		builder := flatbuffers.NewBuilder(nread + 100)
 		body := builder.CreateByteVector(buf[:nread])
+
+		flags := byte(0)
+		if eof {
+			flags |= TxFrameFlagsFinal
+		}
 
 		TxFrameStart(builder)
 		TxFrameAddFrametype(builder, TxFrameTypeBody)
 		TxFrameAddVersion(builder, makeTxHttpVersionNumber(req))
+		TxFrameAddFlags(builder, flags)
 		TxFrameAddChannel(builder, channel)
 		TxFrameAddStream(builder, stream)
-		TxFrameAddBodyOffset(builder, offset)
-		TxFrameAddBodyTotalLength(builder, uint64(req.ContentLength))
 		TxFrameAddBody(builder, body)
 
 		if err := s.endFrameAndSend(backend.con, builder); err != nil {
 			http.Error(w, fmt.Sprintf("Error writing body to backend %v (%v)", backend.id, err), http.StatusGatewayTimeout)
 			return false
 		}
-
-		offset += uint64(nread)
 	}
 
 	return true
@@ -279,36 +292,34 @@ func (s *Server) sendResponse(w http.ResponseWriter, req *http.Request, backend 
 
 func (s *Server) sendResponseFrame(w http.ResponseWriter, req *http.Request, backend *backendConnection, channel, stream uint64, frame *TxFrame) {
 	s.Log.Printf("sendResponseFrame: %v %v %v", channel, stream, frame.Frametype())
-	line := &TxHeaderLine{}
-	frame.Headers(line, 0)
-	codeStr := [3]byte{}
-	codeStr[0] = line.Key(0)
-	codeStr[1] = line.Key(1)
-	codeStr[2] = line.Key(2)
-	statusCode, _ := strconv.Atoi(string(codeStr[:]))
-	keyBuf := [40]byte{}
-	valBuf := [100]byte{}
-	for i := 1; i < frame.HeadersLength(); i++ {
-		frame.Headers(line, i)
-		key := keyBuf[:0]
-		val := valBuf[:0]
-		for j := 0; j < line.KeyLength(); j++ {
-			key = append(key, line.Key(j))
+	if frame.Frametype() == TxFrameTypeHeader {
+		line := &TxHeaderLine{}
+		frame.Headers(line, 0)
+		codeStr := [3]byte{}
+		codeStr[0] = line.Key(0)
+		codeStr[1] = line.Key(1)
+		codeStr[2] = line.Key(2)
+		statusCode, _ := strconv.Atoi(string(codeStr[:]))
+		keyBuf := [40]byte{}
+		valBuf := [100]byte{}
+		for i := 1; i < frame.HeadersLength(); i++ {
+			frame.Headers(line, i)
+			key := keyBuf[:0]
+			val := valBuf[:0]
+			for j := 0; j < line.KeyLength(); j++ {
+				key = append(key, line.Key(j))
+			}
+			for j := 0; j < line.ValueLength(); j++ {
+				val = append(val, line.Value(j))
+			}
+			// We're explicitly not supporting multiple lines with the same key here. So multiple cookies won't work; I think.
+			s.Log.Printf("Sending header (%v)=(%v)", string(key), string(val))
+			w.Header().Set(string(key), string(val))
 		}
-		for j := 0; j < line.ValueLength(); j++ {
-			val = append(val, line.Value(j))
-		}
-		// We're explicitly not supporting multiple lines with the same key here. So multiple cookies won't work; I think.
-		s.Log.Printf("Sending header (%v)=(%v)", string(key), string(val))
-		w.Header().Set(string(key), string(val))
+		s.Log.Printf("Writing status (%v)", statusCode)
+		w.WriteHeader(statusCode)
 	}
-	s.Log.Printf("Writing status (%v)", statusCode)
-	w.WriteHeader(statusCode)
-	// this is ridiculous. We need to just use strings instead. or ask on the flatbuffers mailing list.
-	body := []byte{}
-	for i := 0; i < frame.BodyLength(); i++ {
-		body = append(body, frame.Body(i))
-	}
+	body := frame.BodyBytes()
 	s.Log.Printf("Writing body (len = %v) (%v)", len(body), string(body))
 	for start := 0; start != len(body); {
 		written, err := w.Write(body[start:])
@@ -319,7 +330,7 @@ func (s *Server) sendResponseFrame(w http.ResponseWriter, req *http.Request, bac
 		s.Log.Printf("Wrote %v bytes", written)
 		start += written
 	}
-	s.Log.Printf("Done writing response")
+	s.Log.Printf("Done writing response frame")
 }
 
 func (s *Server) AcceptBackendConnections() {

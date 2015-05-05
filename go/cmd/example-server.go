@@ -2,7 +2,7 @@ package main
 
 import (
 	"fmt"
-	httpbridge "github.com/benharper123/httpbridge/go"
+	httpbridge "github.com/bmharper/httpbridge/go"
 )
 
 func main() {
