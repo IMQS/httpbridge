@@ -2,6 +2,7 @@
 A small C++ library for implementing an HTTP2 API endpoint.
 
 We "outsource" the real HTTP2 server to an external agent. The only such agent that presently exists is one that uses Go's HTTP2 infrastructure.
+There is also a tiny HTTP/1.1 server embedded in the code base, that can be suitable for unit tests of your C++ HTTP service.
 
 In your C++ backend, you only need to include one .cpp file and one .h file in order to serve up requests.
 
@@ -10,7 +11,7 @@ your C++ backend and the Go server.
 
 ### C++ Dependencies:
 
-* C++11 (VS 2013, Clang, GCC)
+* C++11 (VS 2013+, Clang, GCC)
 * Flatbuffers
 * Tested on Linux, Windows
 
@@ -30,7 +31,7 @@ __MSVC:__ `cl -Icpp/flatbuffers/include /EHsc Ws2_32.lib cpp/example-backend.cpp
 __GCC:__ `gcc -Icpp/flatbuffers/include -std=c++11 cpp/example-backend.cpp cpp/http-bridge.cpp -lstdc++ -o example-backend`  
 __Clang:__ `clang -Icpp/flatbuffers/include -std=c++11 cpp/example-backend.cpp cpp/http-bridge.cpp -lstdc++ -o example-backend`  
 
-In order to build your own C++ backend, your need to include the following files into your project. There is no 
+In order to build your own C++ backend, your need to include the following files into your project. There is no prepackaged
 "static library" or "shared library". Just include these files and you're done.
 
 * http-bridge.cpp
@@ -43,9 +44,6 @@ In order to build your own C++ backend, your need to include the following files
 * `env.bat` (Windows)
 * `. env.sh` (Unix)
 * `go get github.com/google/flatbuffers/go`
-* `go get github.com/bmharper/httpbridge/go`
 * `go run cmd/example-server.go`
 * You should now be able to launch the example C++ backend. Once you have both the Go server and C++ backend running,
-you can try `curl localhost:8081`, and you should get a reply.
-* Note that the above sequence of 'go get' will checkout two copies of the Go httpbridge code. This is just something
-that you need to live with if you want to demonstrate using an external Go library from inside itself.
+you can try `curl localhost:8080`, and you should get a reply.

@@ -26,7 +26,7 @@ int main(int argc, char** argv)
 		if (backend.Recv(inframe))
 		{
 			hb::Request* request = inframe.Request;
-			
+
 			if (inframe.BodyBytesLen != 0)
 			{
 				int bytes = (int) inframe.BodyBytesLen;
@@ -37,11 +37,11 @@ int main(int argc, char** argv)
 
 			if (inframe.IsHeader && !inframe.IsLast)
 			{
-				if (... URL matches criteria...)
+				if (... request matches criteria ...)
 				{
 					inframe.ResendWhenBodyIsDone();
 					continue;
-					}
+				}
 			}
 			*/
 
@@ -62,7 +62,11 @@ int main(int argc, char** argv)
 				hb::Response response;
 				response.Init(*request);
 				response.Status = hb::Status200_OK;
-				response.SetBody(5, "hello");
+				// write the request's body back out
+				std::string responseBody = "You said: ";
+				if (request->BodyBuffer.Count != 0)
+					responseBody.append((const char*) request->BodyBuffer.Data, request->BodyBuffer.Count);
+				response.SetBody(responseBody.size(), responseBody.c_str());
 				backend.Send(response);
 				printf("-----------------------------\n");
 			}

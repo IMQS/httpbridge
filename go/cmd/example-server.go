@@ -2,7 +2,8 @@ package main
 
 import (
 	"fmt"
-	httpbridge "github.com/bmharper/httpbridge/go"
+	"httpbridge"
+	//httpbridge "github.com/bmharper/httpbridge/go/src/httpbridge"  --  How to include httpbridge from a regular project
 )
 
 func main() {

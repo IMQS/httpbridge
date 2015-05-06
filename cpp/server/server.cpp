@@ -70,8 +70,8 @@ void Server::cb_http_field(void *data, const char *field, size_t flen, const cha
 {
 	Channel* c = (Channel*) data;
 	c->Headers.push_back({ std::string(field, flen), std::string(value, vlen) });
-	if (flen == 14 && strncmp(field, "Content-Length", 14) == 0)
-		c->ContentLength = uatoi64(value, vlen);
+	//if (flen == 14 && strncmp(field, "Content-Length", 14) == 0)
+	//	c->ContentLength = uatoi64(value, vlen);
 }
 
 void Server::cb_request_method(void *data, const char *at, size_t length)
@@ -148,7 +148,7 @@ void Server::cb_header_done(void *data, const char *at, size_t length)
 
 	HTTPBRIDGE_ASSERT(bufpos == total);
 
-	c->Request.Initialize(nullptr, c->Version, 0, 0, c->ContentLength, (int32_t) c->Headers.size() + 1, hblock);
+	c->Request.Initialize(nullptr, c->Version, 0, 0, (int32_t) c->Headers.size() + 1, hblock);
 }
 
 
@@ -432,7 +432,7 @@ void Server::HandleRequest(Channel& c)
 void Server::ResetChannel(Channel& c)
 {
 	http_parser_init(GetParser(c));
-	c.ContentLength = 0;
+	//c.ContentLength = 0;
 	c.Headers.clear();
 	c.Method = "";
 	c.Request.Reset();

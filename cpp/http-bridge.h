@@ -52,7 +52,7 @@ TODO
 ------------------------------------------------------------------------------------------------
 
 c:\dev\head\otaku\t2-output\win64-2013-debug-default\flatc -c -o cpp -b http-bridge.fbs
-c:\dev\head\otaku\t2-output\win64-2013-debug-default\flatc -g -o go -b http-bridge.fbs
+c:\dev\head\otaku\t2-output\win64-2013-debug-default\flatc -g -o go/src -b http-bridge.fbs
 */
 
 #include <stdint.h>
