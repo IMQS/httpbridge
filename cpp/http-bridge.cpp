@@ -1021,6 +1021,7 @@ namespace hb
 					UnpackHeader(txframe, inframe);
 					inframe.IsHeader = true;
 					inframe.IsLast = !!(txframe->flags() & httpbridge::TxFrameFlags_Final);
+					goodFrame = goodFrame && UnpackBody(txframe, inframe);
 				}
 				else if (txframe->frametype() == httpbridge::TxFrameType_Body)
 				{
@@ -1262,6 +1263,15 @@ namespace hb
 		return (const char*) (_HeaderBlock + lines[0].KeyStart + lines[0].KeyLen + 1);
 	}
 
+	const std::string& Request::Path()
+	{
+		if (_CachedPath == "")
+		{
+			_CachedPath = URI();
+		}
+		return _CachedPath;
+	}
+
 	bool Request::HeaderByName(const char* name, size_t& len, const void*& buf, int nth) const
 	{
 		auto nameLen = strlen(name);
@@ -1334,6 +1344,11 @@ namespace hb
 	{
 	}
 
+	Response::Response(const Request& request)
+	{
+		Init(request);
+	}
+
 	Response::~Response()
 	{
 		if (FBB != nullptr)
@@ -1342,6 +1357,7 @@ namespace hb
 
 	void Response::Init(const Request& request)
 	{
+		Backend = request.Backend;
 		Version = request.Version;
 		Stream = request.Stream;
 		Channel = request.Channel;
@@ -1381,6 +1397,11 @@ namespace hb
 		CreateBuilder();
 		BodyOffset = (ByteVectorOffset) FBB->CreateVector((const uint8_t*) body, len).o;
 		BodyLength = (uint32_t) len;
+	}
+
+	SendResult Response::Send()
+	{
+		return Backend->Send(*this);
 	}
 
 	const char* Response::HeaderByName(const char* name, int nth) const

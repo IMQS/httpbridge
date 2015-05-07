@@ -11,7 +11,7 @@ int main(int argc, char** argv)
 	{
 		if (!backend.IsConnected())
 		{
-			if (backend.Connect("tcp", "localhost:8081"))
+			if (backend.Connect("tcp", "127.0.0.1:8081"))
 			{
 				printf("Connected\n");
 			}
@@ -59,15 +59,14 @@ int main(int argc, char** argv)
 					request->HeaderAt(i, key, val);
 					printf("  %-16s = %s\n", key, val);
 				}
-				hb::Response response;
-				response.Init(*request);
+				hb::Response response(*request);
 				response.Status = hb::Status200_OK;
 				// write the request's body back out
 				std::string responseBody = "You said: ";
 				if (request->BodyBuffer.Count != 0)
 					responseBody.append((const char*) request->BodyBuffer.Data, request->BodyBuffer.Count);
 				response.SetBody(responseBody.size(), responseBody.c_str());
-				backend.Send(response);
+				response.Send();
 				printf("-----------------------------\n");
 			}
 		}

@@ -5,7 +5,6 @@ import (
 	"fmt"
 	flatbuffers "github.com/google/flatbuffers/go"
 	"io"
-	"log"
 	"net"
 	"net/http"
 	"os"
@@ -23,7 +22,7 @@ type Server struct {
 	HttpPort       string
 	BackendPort    string
 	BackendTimeout time.Duration
-	Log            *log.Logger
+	Log            Logger
 
 	httpServer      http.Server
 	httpListener    net.Listener
@@ -61,8 +60,8 @@ func (s *Server) ListenAndServe() error {
 	if s.BackendTimeout == 0 {
 		s.BackendTimeout = time.Second * 120
 	}
-	if s.Log == nil {
-		s.Log = log.New(os.Stdout, "", 0)
+	if s.Log.Target == nil {
+		s.Log.Target = os.Stdout
 	}
 	httpPort := s.HttpPort
 	if httpPort == "" {
@@ -72,9 +71,9 @@ func (s *Server) ListenAndServe() error {
 	if backendPort == "" {
 		backendPort = ":81"
 	}
-	s.Log.Printf("http-bridge server starting")
-	s.Log.Printf("  http port     %v", httpPort)
-	s.Log.Printf("  backend port  %v", backendPort)
+	s.Log.Warnf("http-bridge server starting")
+	s.Log.Warnf("  http port     %v", httpPort)
+	s.Log.Warnf("  backend port  %v", backendPort)
 	s.httpServer.Handler = s
 	if s.httpListener, err = net.Listen("tcp", httpPort); err != nil {
 		return err
@@ -134,11 +133,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		}
 	}
 
-	//<-responseChan
-	//w.Header().Set("Content-Length", "5")
-	//w.WriteHeader(200)
-	//w.Write([]byte("hello"))
 	s.sendResponse(w, req, backend, channel, stream, responseChan)
+
+	s.Log.Infof("Request %v:%v finished", channel, stream)
 }
 
 func (s *Server) sendHeaderFrame(w http.ResponseWriter, req *http.Request, backend *backendConnection, channel, stream uint64, hasBody bool) bool {
@@ -204,7 +201,7 @@ func (s *Server) sendBody(w http.ResponseWriter, req *http.Request, backend *bac
 	static_buf := [4096]byte{}
 	eof := false
 
-	s.Log.Printf("sendBody START")
+	s.Log.Debug("sendBody START")
 
 	for !eof {
 		buf := static_buf[:]
@@ -216,7 +213,7 @@ func (s *Server) sendBody(w http.ResponseWriter, req *http.Request, backend *bac
 			return false
 		}
 
-		s.Log.Printf("sendBody %v", nread)
+		s.Log.Debugf("sendBody %v", nread)
 
 		builder := flatbuffers.NewBuilder(nread + 100)
 		body := builder.CreateByteVector(buf[:nread])
@@ -272,12 +269,18 @@ func (s *Server) sendBytes(dst io.Writer, buf []byte) error {
 
 func (s *Server) sendResponse(w http.ResponseWriter, req *http.Request, backend *backendConnection, channel, stream uint64, responseChan responseChan) {
 	lastMsg := time.Now()
+	remainingBytes := int64(1)
 
-	for {
+	for remainingBytes > 0 {
 		select {
 		case frame := <-responseChan:
 			lastMsg = time.Now()
-			s.sendResponseFrame(w, req, backend, channel, stream, frame)
+			res := s.sendResponseFrame(w, req, backend, channel, stream, frame)
+			if frame.Frametype() == TxFrameTypeHeader {
+				remainingBytes = res
+			} else {
+				remainingBytes -= res
+			}
 			return
 		case <-time.After(time.Second * 3):
 			if time.Now().Sub(lastMsg) > s.BackendTimeout {
@@ -290,8 +293,10 @@ func (s *Server) sendResponse(w http.ResponseWriter, req *http.Request, backend 
 	//http.Error(w, "Message dispatched", http.StatusOK)
 }
 
-func (s *Server) sendResponseFrame(w http.ResponseWriter, req *http.Request, backend *backendConnection, channel, stream uint64, frame *TxFrame) {
-	s.Log.Printf("sendResponseFrame: %v %v %v", channel, stream, frame.Frametype())
+func (s *Server) sendResponseFrame(w http.ResponseWriter, req *http.Request, backend *backendConnection, channel, stream uint64, frame *TxFrame) int64 {
+	remaining_bytes := int64(0)
+	body := frame.BodyBytes()
+	s.Log.Debugf("sendResponseFrame: %v:%v %v", channel, stream, frame.Frametype())
 	if frame.Frametype() == TxFrameTypeHeader {
 		line := &TxHeaderLine{}
 		frame.Headers(line, 0)
@@ -313,31 +318,41 @@ func (s *Server) sendResponseFrame(w http.ResponseWriter, req *http.Request, bac
 				val = append(val, line.Value(j))
 			}
 			// We're explicitly not supporting multiple lines with the same key here. So multiple cookies won't work; I think.
-			s.Log.Printf("Sending header (%v)=(%v)", string(key), string(val))
-			w.Header().Set(string(key), string(val))
+			keyStr := string(key)
+			valStr := string(val)
+			s.Log.Debugf("Sending header (%v)=(%v)", keyStr, valStr)
+			w.Header().Set(keyStr, valStr)
+			if keyStr == "Content-Length" {
+				remaining_bytes, _ = strconv.ParseInt(valStr, 10, 64)
+				remaining_bytes -= int64(len(body))
+			}
 		}
-		s.Log.Printf("Writing status (%v)", statusCode)
+		s.Log.Debugf("Writing status (%v)", statusCode)
 		w.WriteHeader(statusCode)
 	}
-	body := frame.BodyBytes()
-	s.Log.Printf("Writing body (len = %v) (%v)", len(body), string(body))
+	s.Log.Debugf("Writing body (len = %v) (%v)", len(body), string(body))
 	for start := 0; start != len(body); {
 		written, err := w.Write(body[start:])
 		if err != nil {
-			s.Log.Printf("Error writing body: %v %v %v", channel, stream, err)
+			s.Log.Errorf("Error writing body: %v:%v %v", channel, stream, err)
 			break
 		}
-		s.Log.Printf("Wrote %v bytes", written)
+		s.Log.Debugf("Wrote %v body bytes", written)
 		start += written
 	}
-	s.Log.Printf("Done writing response frame")
+	s.Log.Debugf("Done writing response frame")
+	if frame.Frametype() == TxFrameTypeHeader {
+		return remaining_bytes
+	} else {
+		return int64(len(body))
+	}
 }
 
 func (s *Server) AcceptBackendConnections() {
 	for {
 		con, err := s.backendListener.Accept()
 		if err != nil {
-			s.Log.Printf("Error in Bridge Connection Accept: %v", err)
+			s.Log.Errorf("Error in Bridge Connection Accept: %v", err)
 			break
 		}
 		backend := &backendConnection{
@@ -358,7 +373,7 @@ func (s *Server) HandleBackendConnection(backend *backendConnection) {
 	// and only read as much as one frame, thereby ensuring that we frequently
 	// allow ourselves to reset our buffer..
 	s.addBackend(backend)
-	s.Log.Printf("New backend connection %v", backend.id)
+	s.Log.Warnf("New backend connection %v", backend.id)
 	var err error
 	buf := []byte{}
 	bufStart := 0
@@ -373,7 +388,7 @@ func (s *Server) HandleBackendConnection(backend *backendConnection) {
 			break
 		}
 		bufEnd += nbytes
-		s.Log.Printf("Received %v bytes from backend %v", nbytes, backend.id)
+		s.Log.Debugf("Received %v bytes from backend %v", nbytes, backend.id)
 		//sid := makeStreamID(backend., stream)
 		if bufEnd-bufStart >= 4 {
 			frameSize := int(binary.LittleEndian.Uint32(buf[bufStart : bufStart+4]))
@@ -382,11 +397,11 @@ func (s *Server) HandleBackendConnection(backend *backendConnection) {
 				// TODO: get rid of this copy. Can do so by letting a single linear byte buffer be used for each mesasge.
 				bufCopy := make([]byte, frameSize)
 				copy(bufCopy, buf[bufStart:bufStart+frameSize])
-				s.Log.Printf("frameSize: %v, len(bufCopy): %v", frameSize, len(bufCopy))
+				s.Log.Debugf("frameSize: %v, len(bufCopy): %v", frameSize, len(bufCopy))
 				frame := GetRootAsTxFrame(bufCopy, 0)
 				rchan := s.findStreamChannel(frame.Channel(), frame.Stream())
 				if rchan != nil {
-					s.Log.Printf("Sending frame to chan")
+					s.Log.Debugf("Sending frame to chan")
 					rchan <- frame
 				}
 
@@ -406,7 +421,7 @@ func (s *Server) HandleBackendConnection(backend *backendConnection) {
 			}
 		}
 	}
-	s.Log.Printf("Closing backend connection %v (%v)", backend.id, err)
+	s.Log.Warnf("Closing backend connection %v (%v)", backend.id, err)
 	s.removeBackend(backend)
 }
 
@@ -445,7 +460,7 @@ func (s *Server) registerStream(channel, stream uint64) responseChan {
 	s.responsesLock.Lock()
 	sid := makeStreamID(channel, stream)
 	if _, ok := s.responses[sid]; ok {
-		s.Log.Panicf("registerStream called twice on the same stream (%v:%v)", channel, stream)
+		s.Log.Fatalf("registerStream called twice on the same stream (%v:%v)", channel, stream)
 	}
 	c := make(responseChan)
 	s.responses[sid] = c
@@ -457,7 +472,7 @@ func (s *Server) unregisterStream(channel, stream uint64) {
 	s.responsesLock.Lock()
 	sid := makeStreamID(channel, stream)
 	if _, ok := s.responses[sid]; !ok {
-		s.Log.Panicf("unregisterStream called on a non-existing stream (%v:%v)", channel, stream)
+		s.Log.Fatalf("unregisterStream called on a non-existing stream (%v:%v)", channel, stream)
 	}
 	delete(s.responses, sid)
 	s.responsesLock.Unlock()
@@ -468,7 +483,7 @@ func (s *Server) findStreamChannel(channel, stream uint64) responseChan {
 	sid := makeStreamID(channel, stream)
 	rchan, ok := s.responses[sid]
 	if !ok {
-		s.Log.Printf("findStreamChannel failed. Looks like backend has timed out (channel %v, stream %v)", channel, stream)
+		s.Log.Warnf("findStreamChannel failed. Looks like backend has timed out (channel %v, stream %v)", channel, stream)
 		return nil
 	}
 	s.responsesLock.Unlock()

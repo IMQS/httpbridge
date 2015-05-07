@@ -471,6 +471,8 @@ namespace hb
 		const char*				Method() const;		// Returns the method, such as GET or POST
 		const char*				URI() const;		// Returns the URI of the request
 
+		const std::string&		Path();				// Returns the Path of the request
+
 		// Returns the number of headers
 		int32_t					HeaderCount() const { return _HeaderCount == 0 ? 0 : _HeaderCount - NumPseudoHeaderLines; }
 		
@@ -499,6 +501,7 @@ namespace hb
 		int32_t					_HeaderCount = 0;
 		const uint8_t*			_HeaderBlock = nullptr;		// First HeaderLine[] array and then the headers themselves
 		int						_Liveness = 2;				// A reference count on Request.
+		std::string				_CachedPath;
 
 		void					Free();
 	};
@@ -535,20 +538,23 @@ namespace hb
 	public:
 		typedef uint32_t ByteVectorOffset;
 
+		Backend*			Backend = nullptr;
 		HttpVersion			Version = HttpVersion10;
 		uint64_t			Channel = 0;
 		uint64_t			Stream = 0;
 		StatusCode			Status = Status200_OK;
 
 		Response();
+		Response(const Request& request);
 		~Response();
 
-		void			Init(const Request& request);														// Copy [Stream, Channel, Version] from request
+		void			Init(const Request& request);														// Copy [Backend, Stream, Channel, Version] from request
 		void			SetStatus(StatusCode status)														{ Status = status; }
 		void			WriteHeader(const char* key, const char* value);									// Add a header
 		void			WriteHeader(int32_t keyLen, const char* key, int32_t valLen, const char* value);	// Add a header
 		void			SetBody(size_t len, const void* body);												// Set the entire body.
-		
+		SendResult		Send();																				// Call Backend->Send(this)
+
 		int32_t			HeaderCount() const { return HeaderIndex.Size() / 2; }
 
 		// Fetch a header by name.

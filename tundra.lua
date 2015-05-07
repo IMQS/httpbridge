@@ -15,6 +15,21 @@ Build {
 			},
 		}
 
+		local test_backend = Program {
+			Name = "test-backend",
+			Sources = {
+				"cpp/test-backend.cpp",
+				"cpp/http-bridge.cpp",
+			},
+			Includes = {
+				"cpp/flatbuffers/include",
+			},
+			Libs = {
+				{ "Ws2_32.lib"; Config = "win*" },
+				{ "stdc++"; Config = {"*-gcc-*", "*-clang-*"} },
+			},
+		}
+
 		local server = Program {
 			Name = "server",
 			Sources = {
