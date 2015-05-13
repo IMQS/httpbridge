@@ -759,6 +759,8 @@ namespace hb
 		{
 			Request->DecrementLiveness();
 		}
+		
+		// Note that Request can have destroyed itself by this point, so nullptr is the only legal value for it now
 
 		Request = nullptr;
 		IsHeader = false;
@@ -851,6 +853,10 @@ namespace hb
 
 	SendResult Backend::Send(Response& response)
 	{
+		// TODO: Only if this is the last response frame, THEN decrement liveness (ie once we support streaming responses out)
+		Request* req = GetRequestOrDie(response.Channel, response.Stream);
+		req->DecrementLiveness();
+
 		size_t offset = 0;
 		size_t len = 0;
 		void* buf = nullptr;
@@ -1188,11 +1194,16 @@ namespace hb
 
 	void Backend::SendResponse(Request& request, StatusCode status)
 	{
-		Response response;
-		response.Init(request);
+		Response response(&request);
 		response.Status = status;
 		Send(response);
-		request.DecrementLiveness();
+	}
+
+	Request* Backend::GetRequestOrDie(uint64_t channel, uint64_t stream)
+	{
+		auto iter = CurrentRequests.find(MakeStreamKey(channel, stream));
+		HTTPBRIDGE_ASSERT(iter != CurrentRequests.end());
+		return iter->second;
 	}
 
 	StreamKey Backend::MakeStreamKey(uint64_t channel, uint64_t stream)
@@ -1344,9 +1355,13 @@ namespace hb
 	{
 	}
 
-	Response::Response(const Request& request)
+	Response::Response(const Request* request, StatusCode status)
 	{
-		Init(request);
+		Status = status;
+		Backend = request->Backend;
+		Version = request->Version;
+		Stream = request->Stream;
+		Channel = request->Channel;
 	}
 
 	Response::~Response()
@@ -1355,14 +1370,6 @@ namespace hb
 			delete FBB;
 	}
 
-	void Response::Init(const Request& request)
-	{
-		Backend = request.Backend;
-		Version = request.Version;
-		Stream = request.Stream;
-		Channel = request.Channel;
-	}
-	
 	void Response::WriteHeader(const char* key, const char* value)
 	{
 		size_t keyLen = strlen(key);

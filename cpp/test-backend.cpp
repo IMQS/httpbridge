@@ -44,8 +44,14 @@ public:
 		else
 			lr = Requests.at(RequestKey{ inframe.Request->Channel, inframe.Request->Stream });
 
-		if (match("/echo") == 0)		HttpEcho(inframe, lr);
-		else if (match("/stop") == 0)	Stop = true;
+		if (match("/echo"))			HttpEcho(inframe, lr);
+		else if (match("/ping"))	{ hb::Response resp(inframe.Request); resp.Send(); }
+		else if (match("/stop"))
+		{
+			Stop = true;
+			hb::Response resp(inframe.Request);
+			resp.Send();
+		}
 
 		if (inframe.IsLast || inframe.IsAborted)
 			EndRequest(inframe);
@@ -67,7 +73,7 @@ private:
 		if (inframe.IsLast)
 		{
 			const hb::Buffer& body = inframe.Request->IsBuffered ? inframe.Request->BodyBuffer : lr->Body;
-			hb::Response resp(*inframe.Request);
+			hb::Response resp(inframe.Request);
 			resp.SetBody(body.Count, body.Data);
 			resp.Send();
 		}

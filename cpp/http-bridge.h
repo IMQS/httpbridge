@@ -39,7 +39,8 @@ Terms:
 
 Conventions
 Pairs of parameters to a function, where a buffer is specified, are written in the order [length,data]. This is
-opposite to most of the standard C library, where it is [data,length].
+opposite to most of the standard C library, where it is [data,length]. HMMM.. WHY? Probably just change this
+to be consistent with libc.
 
 TODO
 1. Support more advanced features of HTTP/2 such as PUSH frames.
@@ -411,6 +412,7 @@ namespace hb
 		size_t				TotalHeaderBlockSize(const httpbridge::TxFrame* frame);
 		void				LogAndPanic(const char* msg);
 		void				SendResponse(Request& request, StatusCode status);
+		Request*			GetRequestOrDie(uint64_t channel, uint64_t stream);
 		static StreamKey	MakeStreamKey(uint64_t channel, uint64_t stream);
 		static StreamKey	MakeStreamKey(const Request& request);
 	};
@@ -545,10 +547,9 @@ namespace hb
 		StatusCode			Status = Status200_OK;
 
 		Response();
-		Response(const Request& request);
+		Response(const Request* request, StatusCode status = Status200_OK);
 		~Response();
 
-		void			Init(const Request& request);														// Copy [Backend, Stream, Channel, Version] from request
 		void			SetStatus(StatusCode status)														{ Status = status; }
 		void			WriteHeader(const char* key, const char* value);									// Add a header
 		void			WriteHeader(int32_t keyLen, const char* key, int32_t valLen, const char* value);	// Add a header

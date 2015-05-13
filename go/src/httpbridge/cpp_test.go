@@ -2,6 +2,7 @@ package httpbridge
 
 import (
 	"bytes"
+	"flag"
 	"fmt"
 	"io"
 	"io/ioutil"
@@ -13,12 +14,19 @@ import (
 )
 
 const (
-	baseUrl = "http://127.0.0.1:8080"
+	serverFrontPort   = "127.0.0.1:8080"
+	serverBackendPort = "127.0.0.1:8081"
+	baseUrl           = "http://" + serverFrontPort
 )
 
 var cpp_server *exec.Cmd
 var cpp_server_out *bytes.Buffer
 var front_server *Server
+var pingClient http.Client
+
+// This is useful when you want to launch test-backend.exe from the C++ debugger
+// go test httpbridge -external_backend
+var external_backend = flag.Bool("external_backend", false, "Use an externally launched backend server")
 
 func build_cpp() error {
 	//cwd, _ := os.Getwd()
@@ -34,35 +42,34 @@ func build_cpp() error {
 
 // process setup
 func setup() error {
-	// Compile backend
-	if err := build_cpp(); err != nil {
-		return err
+	flag.Parse()
+	if !*external_backend {
+		// Compile backend
+		if err := build_cpp(); err != nil {
+			return err
+		}
 	}
 	return nil
 }
 
 // process tear-down
 func teardown() {
-	fmt.Printf("teardown... ")
 	kill_cpp(nil)
 	//kill_front()
-	fmt.Printf("teardown done\n")
 }
 
 func kill_cpp(t *testing.T) {
+	if *external_backend {
+		return
+	}
 	if cpp_server != nil {
-		fmt.Printf("Stopping cpp server\n")
-		time.Sleep(10 * time.Second)
-		resp, _ := http.Get(baseUrl + "/stop")
-		fmt.Printf("read\n")
-		if resp.Body != nil {
-			io.Copy(ioutil.Discard, resp.Body)
+		if t != nil {
+			t.Logf("Stopping cpp server")
 		}
-		fmt.Printf("close\n")
+		resp, _ := http.Get(baseUrl + "/stop")
+		io.Copy(ioutil.Discard, resp.Body)
 		resp.Body.Close()
-		fmt.Printf("wait\n")
 		cpp_server.Wait()
-		fmt.Printf("cpp server stopped\n")
 		if t != nil {
 			if !cpp_server.ProcessState.Success() {
 				t.Logf("cpp output:\n%v\n", string(cpp_server_out.Bytes()))
@@ -86,25 +93,43 @@ func restart(t *testing.T) {
 	//kill_front()
 	kill_cpp(t)
 
-	// Launch HTTP server (front-end)
+	// Launch HTTP server (front-end).
+	// I can't figure out how to properly terminate the net/http serving infrastructure, so we just
+	// leave the front-end running.
 	if front_server == nil {
 		front_server = &Server{}
-		front_server.HttpPort = "127.0.0.1:8080"
-		front_server.BackendPort = "127.0.0.1:8081"
-		front_server.Log.Level = LogLevelDebug
+		front_server.HttpPort = serverFrontPort
+		front_server.BackendPort = serverBackendPort
+		front_server.Log.Level = LogLevelInfo
 		go front_server.ListenAndServe()
 	}
 
 	// Launch backend
-	fmt.Printf("Starting cpp server")
-	cpp_server = exec.Command(cpp_test_bin)
-	cpp_server_out = &bytes.Buffer{}
-	cpp_server.Stdout = cpp_server_out
-	if err := cpp_server.Start(); err != nil {
-		t.Fatalf("Failed to launch cpp backend: %v", err)
+	if !*external_backend {
+		cpp_server = exec.Command(cpp_test_bin)
+		cpp_server_out = &bytes.Buffer{}
+		cpp_server.Stdout = cpp_server_out
+		if err := cpp_server.Start(); err != nil {
+			t.Fatalf("Failed to launch cpp backend: %v", err)
+		}
 	}
 
-	time.Sleep(2 * time.Second)
+	// Wait for backend to come alive
+	for {
+		resp, err := pingClient.Get(baseUrl + "/ping")
+		if err == nil {
+			io.Copy(ioutil.Discard, resp.Body)
+			resp.Body.Close()
+			if resp.StatusCode == http.StatusOK {
+				break
+			} else {
+				t.Logf("Waiting for backend to come alive... code = %v\n", resp.StatusCode)
+			}
+		} else {
+			t.Logf("Waiting for backend to come alive... error = %v\n", err)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
 }
 
 func doPost(t *testing.T, url string, body string) *http.Response {
@@ -136,6 +161,24 @@ func testPost(t *testing.T, url string, body string, expectCode int, expectBody 
 	}
 }
 
+func generateBuf(numBytes int) string {
+	if numBytes > 1024*1024 {
+		fmt.Printf("Generating %v junk buffer\n", numBytes)
+	}
+	buf := make([]byte, 0, numBytes)
+	for i := 0; len(buf) < numBytes; i++ {
+		chunk := fmt.Sprintf("%v_", len(buf))
+		if len(buf)+len(chunk) > numBytes {
+			chunk = chunk[0 : numBytes-len(buf)]
+		}
+		buf = append(buf, []byte(chunk)...)
+	}
+	if numBytes > 1024*1024 {
+		fmt.Printf("Generation done\n")
+	}
+	return string(buf)
+}
+
 func TestMain(m *testing.M) {
 	if err := setup(); err != nil {
 		fmt.Printf("%v\n", err)
@@ -148,5 +191,12 @@ func TestMain(m *testing.M) {
 
 func TestEcho(t *testing.T) {
 	restart(t)
+
 	testPost(t, "/echo", "Hello!", 200, "Hello!")
+
+	smallBuf := generateBuf(5 * 1024)
+	testPost(t, "/echo", smallBuf, 200, smallBuf)
+
+	bigBuf := generateBuf(3 * 1024 * 1024)
+	testPost(t, "/echo", bigBuf, 200, bigBuf)
 }

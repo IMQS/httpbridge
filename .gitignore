@@ -1,7 +1,10 @@
+*.pdb
+*.obj
+*.ilk
 .tundra2.*
 t2-output/*
 example-backend
 example-backend.exe
-example-backend.obj
 http-bridge.obj
 vs2013
+go/src/httpbridge/test-backend.exe

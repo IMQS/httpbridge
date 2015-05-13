@@ -198,13 +198,25 @@ func (s *Server) sendBody(w http.ResponseWriter, req *http.Request, backend *bac
 	// or jumbo frames (9000 bytes). Also, you have the multiple simultaneous streams to consider (ie you don't want to bloat
 	// up your front-end's memory with buffers). If the HTTP process and the backend are on the same machine, then I'm guessing you'd
 	// want a buffer quite a bit bigger than an ethernet frame.
-	static_buf := [4096]byte{}
+	static_buf := [8 * 1024]byte{}
+	total_body_sent := 0
 	eof := false
+	var dynamic_buf []byte
+	dynamic_buf_size := int(clampInt64(req.ContentLength, int64(len(static_buf)), 64*1024))
 
 	s.Log.Debug("sendBody START")
 
 	for !eof {
-		buf := static_buf[:]
+		var buf []byte
+		// Only upgrade to a larger buffer if the user has actually sent 8KB. This limits amplification attacks.
+		if total_body_sent >= 8*1024 && dynamic_buf_size >= len(static_buf) {
+			if dynamic_buf == nil {
+				dynamic_buf = make([]byte, dynamic_buf_size)
+			}
+			buf = dynamic_buf[:]
+		} else {
+			buf = static_buf[:]
+		}
 		nread, err := req.Body.Read(buf)
 		eof = err == io.EOF
 		if err != nil && !eof {
@@ -217,6 +229,7 @@ func (s *Server) sendBody(w http.ResponseWriter, req *http.Request, backend *bac
 
 		builder := flatbuffers.NewBuilder(nread + 100)
 		body := builder.CreateByteVector(buf[:nread])
+		total_body_sent += nread
 
 		flags := byte(0)
 		if eof {
@@ -330,7 +343,7 @@ func (s *Server) sendResponseFrame(w http.ResponseWriter, req *http.Request, bac
 		s.Log.Debugf("Writing status (%v)", statusCode)
 		w.WriteHeader(statusCode)
 	}
-	s.Log.Debugf("Writing body (len = %v) (%v)", len(body), string(body))
+	s.Log.Debugf("Writing body (len = %v)", len(body))
 	for start := 0; start != len(body); {
 		written, err := w.Write(body[start:])
 		if err != nil {
@@ -359,66 +372,73 @@ func (s *Server) AcceptBackendConnections() {
 			con: con,
 			id:  0,
 		}
-		go s.HandleBackendConnection(backend)
+		go s.handleBackendConnection(backend)
 	}
 }
 
-func (s *Server) HandleBackendConnection(backend *backendConnection) {
-	// I first thought that I'd use a circular buffer here, to store data that
-	// we receive from the backend. That has complications though, because
-	// flatbuffers needs a linear buffer as input. Instead, I've opted for
-	// optimistically resetting a buffer to zero, assuming that there will fairly
-	// often be points where our buffer ends precisely on the edge of a frame,
-	// allowing us to rewind the buffer. We can even take that a step further
-	// and only read as much as one frame, thereby ensuring that we frequently
-	// allow ourselves to reset our buffer..
+func clampInt(v, min, max int) int {
+	if v < min {
+		return min
+	} else if v > max {
+		return max
+	}
+	return v
+}
+
+func clampInt64(v, min, max int64) int64 {
+	if v < min {
+		return min
+	} else if v > max {
+		return max
+	}
+	return v
+}
+
+func (s *Server) handleBackendConnection(backend *backendConnection) {
+	// One may be tempted here to try and reuse a single buffer to read incoming data.
+	// That doesn't work though, because you end up having to produce a copy of the entire
+	// frame, so that you can use that as a flatbuffer which you pass out to the channel
+	// that ends up sending the data back over HTTP.
+	// To keep things simple, we never read over a frame boundary.
 	s.addBackend(backend)
 	s.Log.Warnf("New backend connection %v", backend.id)
 	var err error
 	buf := []byte{}
-	bufStart := 0
-	bufEnd := 0
+	bufSize := 0 // distinct from len(buf). bufSize is how many bytes we've actually read.
 	for {
 		var nbytes int
-		for len(buf)-bufStart < 1024 {
+		maxRead := clampInt(bufSize, 1024, 70*1024) // 64k of data plus some headers. no science behind these numbers.
+		frameSize := 0
+		if bufSize >= 4 {
+			frameSize = int(binary.LittleEndian.Uint32(buf[:4]))
+		} else {
+			maxRead = 4
+		}
+
+		// Never read over a frame boundary
+		if maxRead > frameSize+4-bufSize {
+			maxRead = frameSize + 4 - bufSize
+		}
+		for len(buf)-bufSize < maxRead {
 			buf = append(buf, 0)
 		}
-		nbytes, err = backend.con.Read(buf[bufStart:])
+		nbytes, err = backend.con.Read(buf[bufSize : bufSize+maxRead])
 		if err != nil {
 			break
 		}
-		bufEnd += nbytes
-		s.Log.Debugf("Received %v bytes from backend %v", nbytes, backend.id)
-		//sid := makeStreamID(backend., stream)
-		if bufEnd-bufStart >= 4 {
-			frameSize := int(binary.LittleEndian.Uint32(buf[bufStart : bufStart+4]))
-			if bufEnd-bufStart >= 4+frameSize {
-				bufStart += 4
-				// TODO: get rid of this copy. Can do so by letting a single linear byte buffer be used for each mesasge.
-				bufCopy := make([]byte, frameSize)
-				copy(bufCopy, buf[bufStart:bufStart+frameSize])
-				s.Log.Debugf("frameSize: %v, len(bufCopy): %v", frameSize, len(bufCopy))
-				frame := GetRootAsTxFrame(bufCopy, 0)
-				rchan := s.findStreamChannel(frame.Channel(), frame.Stream())
-				if rchan != nil {
-					s.Log.Debugf("Sending frame to chan")
-					rchan <- frame
-				}
-
-				bufStart += frameSize
-				if bufStart == bufEnd {
-					// rewind the buffer -- NOTE this means we can avoid the mem copy for the above code
-					bufStart = 0
-					bufEnd = 0
-				} else if len(buf) > bufStart*10 {
-					// force rewind of buffer if more than 10x waste
-					buf2 := make([]byte, bufEnd-bufStart)
-					copy(buf2, buf[bufStart:bufEnd])
-					buf = buf2
-					bufStart = 0
-					bufEnd = len(buf2)
-				}
+		bufSize += nbytes
+		s.Log.Debugf("Received %v bytes from backend %v (%v)", nbytes, backend.id, bufSize)
+		if frameSize != 0 && bufSize >= 4+frameSize {
+			frame := GetRootAsTxFrame(buf[4:], 0)
+			rchan := s.findStreamChannel(frame.Channel(), frame.Stream())
+			if rchan != nil {
+				s.Log.Debugf("Sending frame to chan")
+				rchan <- frame
 			}
+			buf = []byte{}
+			bufSize = 0
+		} else {
+			s.Log.Debugf("Have %v/%v frame bytes", bufSize-4, frameSize)
 		}
 	}
 	s.Log.Warnf("Closing backend connection %v (%v)", backend.id, err)

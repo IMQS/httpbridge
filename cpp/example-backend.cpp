@@ -59,7 +59,7 @@ int main(int argc, char** argv)
 					request->HeaderAt(i, key, val);
 					printf("  %-16s = %s\n", key, val);
 				}
-				hb::Response response(*request);
+				hb::Response response(request);
 				response.Status = hb::Status200_OK;
 				// write the request's body back out
 				std::string responseBody = "You said: ";
