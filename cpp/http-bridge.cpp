@@ -1473,7 +1473,7 @@ namespace hb
 		return _CachedURI + 2;
 	}
 
-	const char* Request::QueryParam(const char* key) const
+	const char* Request::Query(const char* key) const
 	{
 		const char* p = _CachedURI;
 		uint16_t len = *((uint16_t*) p);
@@ -1493,6 +1493,12 @@ namespace hb
 			len = *((uint16_t*) p);
 		}
 		return nullptr;
+	}
+
+	std::string Request::QueryStr(const char* key) const
+	{
+		const char* v = Query(key);
+		return v == nullptr ? "" : v;
 	}
 
 	int32_t Request::NextQuery(int32_t iterator, const char*& key, const char*& value) const

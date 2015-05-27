@@ -506,7 +506,8 @@ namespace hb
 
 		const char*				Path() const;		// Returns the Path of the request
 
-		const char*				QueryParam(const char* key) const;	// Returns the first URL query parameter for the given key, or NULL if none found
+		const char*				Query(const char* key) const;		// Returns the first URL query parameter for the given key, or NULL if none found
+		std::string				QueryStr(const char* key) const;	// Returns the first URL query parameter for the given key, or an empty string if none found
 
 		// Use NextQuery to iterate over the query parameters.
 		// Returns zero if there are no more items.
