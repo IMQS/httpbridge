@@ -319,11 +319,28 @@ namespace hb
 	template<typename T> T min(T a, T b) { return a < b ? a : b; }
 	template<typename T> T max(T a, T b) { return a < b ? b : a; }
 
+	static int HexToInt(char c)
+	{
+		if (c >= '0' && c <= '9')
+			return c - '0';
+		if (c >= 'a' && c <= 'f')
+			return 10 + c - 'a';
+		if (c >= 'A' && c <= 'F')
+			return 10 + c - 'A';
+		return 0;
+	}
+
 	static void BufWrite(uint8_t*& buf, const void* src, size_t len)
 	{
 		memcpy(buf, src, len);
 		buf += len;
 	}
+
+	// Round up to the next even number
+	template<typename T> T RoundUpEven(T v) { return (v + 1) & ~1; }
+
+	// Round up to the next odd number
+	template<typename T> T RoundUpOdd(T v) { return (v & ~1) + 1; }
 
 	hb::HttpVersion TranslateVersion(httpbridge::TxHttpVersion v)
 	{
@@ -747,28 +764,41 @@ namespace hb
 
 	void InFrame::Reset()
 	{
-		if (Request != nullptr && !Request->BodyBuffer.IsPointerInside(BodyBytes))
-			Free(BodyBytes);
-		
-		if (IsAborted)
+		if (Request != nullptr)
 		{
-			Request->DecrementLiveness();
-			Request->DecrementLiveness();
-		}
-		else if (IsLast)
-		{
-			Request->DecrementLiveness();
-		}
-		
-		// Note that Request can have destroyed itself by this point, so nullptr is the only legal value for it now
+			if (!Request->BodyBuffer.IsPointerInside(BodyBytes))
+				Free(BodyBytes);
 
-		Request = nullptr;
+			if (IsAborted)
+			{
+				Request->DecrementLiveness();
+				Request->DecrementLiveness();
+			}
+			else if (IsLast)
+			{
+				Request->DecrementLiveness();
+			}
+			// Note that Request can have destroyed itself by this point, so NULL is the only legal value for it now
+			Request = nullptr;
+		}
+
 		IsHeader = false;
 		IsLast = false;
 		IsAborted = false;
 
 		BodyBytes = nullptr;
 		BodyBytesLen = 0;
+	}
+
+	void InFrame::DeleteRequestAndReset()
+	{
+		if (Request != nullptr)
+		{
+			Request->DecrementLiveness();
+			Request->DecrementLiveness();
+		}
+		Request = nullptr;
+		Reset();
 	}
 
 	bool InFrame::ResendWhenBodyIsDone()
@@ -1003,6 +1033,8 @@ namespace hb
 		}
 
 		// Read
+		// TODO: Read exactly one frame at a time. First read 4 bytes for the frame length, and thereafter read only
+		// exactly as much as is necesary for that single frame. Then we don't need to do a memmove, and things become simpler.
 		size_t read = 0;
 		auto result = Transport->Recv(RecvBufCapacity - RecvSize, read, RecvBuf + RecvSize);
 		if (result == RecvResult_Closed)
@@ -1021,17 +1053,20 @@ namespace hb
 			{
 				// We have a frame to process.
 				const httpbridge::TxFrame* txframe = httpbridge::GetTxFrame((uint8_t*) RecvBuf + 4);
-				bool goodFrame = true;
+				FrameStatus headStatus = FrameOK;
+				FrameStatus bodyStatus = FrameOK;
 				if (txframe->frametype() == httpbridge::TxFrameType_Header)
 				{
-					UnpackHeader(txframe, inframe);
+					headStatus = UnpackHeader(txframe, inframe);
 					inframe.IsHeader = true;
 					inframe.IsLast = !!(txframe->flags() & httpbridge::TxFrameFlags_Final);
-					goodFrame = goodFrame && UnpackBody(txframe, inframe);
+					bodyStatus = UnpackBody(txframe, inframe);
+					if (headStatus == FrameOK && !inframe.Request->ParseURI())
+						headStatus = FrameURITooLong;
 				}
 				else if (txframe->frametype() == httpbridge::TxFrameType_Body)
 				{
-					goodFrame = goodFrame && UnpackBody(txframe, inframe);
+					bodyStatus = UnpackBody(txframe, inframe);
 					inframe.IsLast = !!(txframe->flags() & httpbridge::TxFrameFlags_Final);
 				}
 				else if (txframe->frametype() == httpbridge::TxFrameType_Abort)
@@ -1044,13 +1079,19 @@ namespace hb
 					Close();
 					return RecvResult_Closed;
 				}
-				// #TODO: get rid of this expensive move by using a circular buffer. AHEM.. one can't use a circular buffer with FlatBuffers.
-				// But maybe we use something like flip/flopping buffers. ie two buffers that we alternate between.
 				memmove(RecvBuf, RecvBuf + 4 + frameSize, RecvSize - frameSize - 4);
 				RecvSize -= frameSize + 4;
-				if (!goodFrame)
+				if (headStatus != FrameOK || bodyStatus != FrameOK)
 				{
-					inframe.Reset();
+					if (headStatus == FrameURITooLong)
+					{
+						SendResponse(txframe->channel(), txframe->stream(), Status414_URI_Too_Long);
+					}
+					else if (headStatus == FrameOutOfMemory || bodyStatus == FrameOutOfMemory)
+					{
+						SendResponse(txframe->channel(), txframe->stream(), Status503_Service_Unavailable);
+					}
+					inframe.DeleteRequestAndReset();
 					return RecvResult_NoData;
 				}
 				return RecvResult_Data;
@@ -1060,11 +1101,13 @@ namespace hb
 		return RecvResult_NoData;
 	}
 
-	void Backend::UnpackHeader(const httpbridge::TxFrame* txframe, InFrame& inframe)
+	Backend::FrameStatus Backend::UnpackHeader(const httpbridge::TxFrame* txframe, InFrame& inframe)
 	{
 		auto headers = txframe->headers();
 		size_t headerBlockSize = TotalHeaderBlockSize(txframe);
-		uint8_t* hblock = (uint8_t*) Alloc(headerBlockSize, Log);
+		uint8_t* hblock = (uint8_t*) Alloc(headerBlockSize, Log, false);
+		if (hblock == nullptr)
+			return FrameOutOfMemory;
 
 		auto lines = (Request::HeaderLine*) hblock;								// header lines
 		int32_t hpos = (headers->size() + 1) * sizeof(Request::HeaderLine);		// offset into hblock
@@ -1103,9 +1146,10 @@ namespace hb
 
 		inframe.Request = new hb::Request();
 		inframe.Request->Initialize(this, TranslateVersion(txframe->version()), txframe->channel(), txframe->stream(), headers->size(), hblock);
+		return FrameOK;
 	}
 
-	bool Backend::UnpackBody(const httpbridge::TxFrame* txframe, InFrame& inframe)
+	Backend::FrameStatus Backend::UnpackBody(const httpbridge::TxFrame* txframe, InFrame& inframe)
 	{
 		if (inframe.Request == nullptr)
 		{
@@ -1113,22 +1157,22 @@ namespace hb
 			if (cr == CurrentRequests.end())
 			{
 				AnyLog()->Logf("Received body bytes for unknown stream [%lld:%lld]", txframe->channel(), txframe->stream());
-				return false;
+				return FrameInvalid;
 			}
 			inframe.Request = cr->second;
 		}
 
 		// Empty body frames are a waste, but not an error. Likely to be the final frame.
 		if (txframe->body() == nullptr)
-			return true;
+			return FrameOK;
 
 		if (inframe.Request->IsBuffered)
 		{
 			Buffer& buf = inframe.Request->BodyBuffer;
 			if (buf.Count + inframe.BodyBytesLen > inframe.Request->BodyLength)
 			{
-				AnyLog()->Log("Request sent too many body bytes. Ignoring frame");
-				return false;
+				AnyLog()->Logf("Request sent too many body bytes. Ignoring frame [%lld:%lld]", txframe->channel(), txframe->stream());
+				return FrameInvalid;
 			}
 			// Assume that a buffer realloc is going to grow by buf.Capacity (ie 2x growth).
 			if (buf.Count + txframe->body()->size() > buf.Capacity && BufferedRequestsTotalBytes + buf.Capacity > MaxWaitingBufferTotal)
@@ -1139,13 +1183,13 @@ namespace hb
 			if (!buf.TryWrite(txframe->body()->Data(), txframe->body()->size()))
 			{
 				// TODO: figure out a way to terminate the stream right here, with a 503 response
-				AnyLog()->Log("Failed to allocate memory for body frame");
-				return false;
+				AnyLog()->Logf("Failed to allocate memory for body frame [%lld:%lld]", txframe->channel(), txframe->stream());
+				return FrameOutOfMemory;
 			}
 			BufferedRequestsTotalBytes += buf.Capacity - oldBufCapacity;
 			inframe.BodyBytesLen = txframe->body()->size();
 			inframe.BodyBytes = buf.Data + buf.Count - txframe->body()->size();
-			return true;
+			return FrameOK;
 		}
 		else
 		{
@@ -1156,7 +1200,7 @@ namespace hb
 				inframe.BodyBytes = (uint8_t*) Alloc(inframe.BodyBytesLen, Log);
 				memcpy(inframe.BodyBytes, txframe->body()->Data(), inframe.BodyBytesLen);
 			}
-			return true;
+			return FrameOK;
 		}
 	}
 
@@ -1194,8 +1238,17 @@ namespace hb
 
 	void Backend::SendResponse(Request& request, StatusCode status)
 	{
-		Response response(&request);
-		response.Status = status;
+		Response response(&request, status);
+		Send(response);
+	}
+
+	void Backend::SendResponse(uint64_t channel, uint64_t stream, StatusCode status)
+	{
+		Request tmp;
+		tmp.Backend = this;
+		tmp.Channel = channel;
+		tmp.Stream = stream;
+		Response response(&tmp, status);
 		Send(response);
 	}
 
@@ -1214,6 +1267,147 @@ namespace hb
 	StreamKey Backend::MakeStreamKey(const Request& request)
 	{
 		return StreamKey{ request.Channel, request.Stream };
+	}
+
+	//////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+	//////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+	//////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+	void UrlPathParser::MeasurePath(const char* buf, int& rawLen, int& decodedLen)
+	{
+		int i = 0;
+		int _decodedLen = 0;
+		for (; buf[i] != 0 && buf[i] != '?'; i++)
+		{
+			if (buf[i] == '%' && buf[i + 1] != 0 && buf[i + 2] != 0)
+				i += 2;
+			_decodedLen++;
+		}
+		rawLen = i;
+		decodedLen = _decodedLen;
+	}
+
+	void UrlPathParser::DecodePath(const char* buf, char* decodedPath, bool addNullTerminator)
+	{
+		int j = 0;
+		for (int i = 0; buf[i] != 0 && buf[i] != '?'; i++)
+		{
+			if (buf[i] == '%' && buf[i + 1] != 0 && buf[i + 2] != 0)
+			{
+				decodedPath[j++] = (HexToInt(buf[i + 1]) << 4) + HexToInt(buf[i + 2]);
+				i += 2;
+			}
+			else
+				decodedPath[j++] = buf[i];
+		}
+		if (addNullTerminator)
+			decodedPath[j++] = 0;
+	}
+
+
+	/* Parse a=b&c=d
+
+	The following truth table is not really what is output from the parser, but it's the final result
+	of what we do with the parser's output. For example, if a key is empty but the value is not,
+	then the parser will simply tell you those facts. It's your choice to discard pairs with empty keys.
+
+	a		->	[a,]
+	&a		->	[a,]			Pairs with empty keys are discarded
+	=x&a	->	[a,]
+	a&b		->	[a,] [b,]
+	a=&b	->	[a,] [b,]
+	a=1&b	->	[a,1] [b,]
+	a==1&b	->	[a,=1] [b,]
+	a=1=	->	[a,1=]
+
+	The rule, basically, is that no matter what you're parsing, if you find an ampersand, then it's a new key/value pair.
+	If you're parsing a key, then an equal sign ends the key and switches to the value.
+	*/
+	bool UrlQueryParser::Next(int& key, int& keyDecodedLen, int& val, int& valDecodedLen)
+	{
+		if (Src[P] == 0)
+			return false;
+			
+		// Keep this in sync with UrlDecodePiece()
+		key = P;
+		int ndecoded = 0;
+		for (; Src[P] != 0 && Src[P] != '=' && Src[P] != '&'; P++)
+		{
+			if (Src[P] == '%' && Src[P + 1] != 0 && Src[P + 2] != 0)
+			{
+				P += 2;
+				ndecoded++;
+			}
+			else
+				ndecoded++;
+		}
+		keyDecodedLen = ndecoded;
+		if (Src[P] == 0 || Src[P] == '&')
+		{
+			if (Src[P] == '&')
+				P++;
+			val = -1;
+			valDecodedLen = 0;
+			return true;
+		}
+
+		// Keep this in sync with UrlDecodePiece()
+		P++;
+		val = P;
+		ndecoded = 0;
+		for (; Src[P] != 0 && Src[P] != '&'; P++)
+		{
+			if (Src[P] == '%' && Src[P + 1] != 0 && Src[P + 2] != 0)
+			{
+				P += 2;
+				ndecoded++;
+			}
+			else
+				ndecoded++;
+		}
+		valDecodedLen = ndecoded;
+		if (Src[P] == '&')
+			P++;
+		return true;
+	}
+
+	void UrlQueryParser::DecodeKey(int start, char* key, bool addNullTerminator)
+	{
+		DecodeKey(Src, start, key, addNullTerminator);
+	}
+
+	void UrlQueryParser::DecodeVal(int start, char* val, bool addNullTerminator)
+	{
+		DecodeVal(Src, start, val, addNullTerminator);
+	}
+
+	template<bool IsVal>
+	void UrlDecodePiece(const char* buf, char* decoded, bool addNullTerminator)
+	{
+		// Keep this in sync with Next()
+		int p = 0;
+		int j = 0;
+		for (; buf[p] != 0 && buf[p] != '&' && (IsVal || (buf[p] != '=')); p++)
+		{
+			if (buf[p] == '%' && buf[p + 1] != 0 && buf[p + 2] != 0)
+			{
+				decoded[j++] = (HexToInt(buf[p + 1]) << 4) + HexToInt(buf[p + 2]);
+				p += 2;
+			}
+			else
+				decoded[j++] = buf[p];
+		}
+		if (addNullTerminator)
+			decoded[j++] = 0;
+	}
+	void UrlQueryParser::DecodeKey(const char* buf, int start, char* key, bool addNullTerminator)
+	{
+		UrlDecodePiece<false>(buf + start, key, addNullTerminator);
+	}
+
+	void UrlQueryParser::DecodeVal(const char* buf, int start, char* val, bool addNullTerminator)
+	{
+		UrlDecodePiece<true>(buf + start, val, addNullTerminator);
 	}
 
 	//////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -1274,13 +1468,57 @@ namespace hb
 		return (const char*) (_HeaderBlock + lines[0].KeyStart + lines[0].KeyLen + 1);
 	}
 
-	const std::string& Request::Path()
+	const char* Request::Path() const
 	{
-		if (_CachedPath == "")
+		return _CachedURI + 2;
+	}
+
+	const char* Request::QueryParam(const char* key) const
+	{
+		const char* p = _CachedURI;
+		uint16_t len = *((uint16_t*) p);
+		p += 2 + RoundUpOdd(len) + 1; // skip path
+		for (len = *((uint16_t*) p); len != EndOfQueryMarker; )
 		{
-			_CachedPath = URI();
+			p += 2;
+			if (strcmp(key, p) == 0)
+				return p + RoundUpOdd(len) + 1 + 2;
+			
+			// key
+			p += RoundUpOdd(len) + 1;
+			len = *((uint16_t*) p);
+
+			// value
+			p += 2 + RoundUpOdd(len) + 1;
+			len = *((uint16_t*) p);
 		}
-		return _CachedPath;
+		return nullptr;
+	}
+
+	int32_t Request::NextQuery(int32_t iterator, const char*& key, const char*& value) const
+	{
+		const char* p = _CachedURI + iterator;
+		uint16_t len = *((uint16_t*) p);
+		if (iterator == 0)
+		{
+			// skip path
+			p += 2 + RoundUpOdd(len) + 1;
+			len = *((uint16_t*) p);
+		}
+		if (len == EndOfQueryMarker)
+		{
+			key = nullptr;
+			value = nullptr;
+			return 0;
+		}
+
+		key = p + 2;
+		p += 2 + RoundUpOdd(len) + 1;
+		len = *((uint16_t*) p);
+		value = p + 2;
+		p += 2 + RoundUpOdd(len) + 1;
+
+		return (int32_t) (p - _CachedURI);
 	}
 
 	bool Request::HeaderByName(const char* name, size_t& len, const void*& buf, int nth) const
@@ -1342,7 +1580,179 @@ namespace hb
 
 	void Request::Free()
 	{
+		hb::Free(_CachedURI);
 		hb::Free((void*) _HeaderBlock);
+	}
+
+	// Return false if the decoded length of either the path or any query item exceeds 65534 characters
+	bool Request::ParseURI()
+	{
+		// Split our URI into two pieces, the path section and the query section.
+		// The query section we split into key,value,key,value,... separated by null characters.
+		// During all of this, we decode percent encodings.
+		// Our final result is one buffer, containing all of the split and decoded parts, as well as
+		// a lookup table that helps us find the value for a particular query key.
+		// For example, given the URL /api/fetch/%41xy?key1=val1&%6d=12
+		// ... we end up producing a single buffer containing:
+		//
+		// ValuePos		x,y						an array of int32, which is an offset that points to the value for that entry
+		// Path			/api/fetch/Axy
+		// Keys			key1 m
+		// Query		val1 12					the first characters of these items is pointed to by 'x' and 'y'
+
+		// Decode the URI into Path and Query key=value pairs. We perform percent-decoding here.
+		// Our final output buffer looks like this:
+		// len,path, len,key, len,val, len,key, len,val...
+		// len = unsigned 16-bit length, excluding null terminator. so maximum decoded key/value length is 65534, and same limit applies to the decoded path too.
+		// Why 65534? Because we use 65535 as an end-of-list marker
+		// Also, we make sure to keep the 16-bit length counters aligned.
+		// We store the exact lengths in the 16-bit numbers, so we always need to perform the rounding when scanning through the list.
+		const int MAXLEN = 65534;
+		static_assert(MAXLEN < EndOfQueryMarker, "MAXLEN must be less than EndOfQueryMarker");
+
+		// Measure the size of the buffer that we'll need
+		const char* uri = URI();
+
+		// measure path length
+		int pathRawLen, pathDecodedLen;
+		UrlPathParser::MeasurePath(uri, pathRawLen, pathDecodedLen);
+		if (pathDecodedLen > MAXLEN)
+			return false;
+
+		const bool hasQuery = uri[pathRawLen] != 0;
+
+		// measure query key=value pairs
+		int queryTotalBytes = 0;
+		if (hasQuery)
+		{
+			UrlQueryParser p(uri + pathRawLen + 1); // +1 to skip the "?"
+			int key, keyLen, val, valLen;
+			while (p.Next(key, keyLen, val, valLen))
+			{
+				if (keyLen > MAXLEN || valLen > MAXLEN)
+					return false;
+				queryTotalBytes += 2 + RoundUpOdd(keyLen) + 1 + 2 + RoundUpOdd(valLen) + 1; // +2 for lengths, +1 for null terminators. Round to keep lengths 16-bit aligned.
+			}
+		}
+
+		// Alloc buffer and decode path
+		int bufLen = 2 + RoundUpOdd(pathDecodedLen) + 1 + queryTotalBytes + 2;
+		_CachedURI = (char*) hb::Alloc(bufLen, Backend->AnyLog()); // 2+ for the length of the path, 1+ for the null terminator
+		char* out = _CachedURI;
+		*((uint16_t*) out) = pathDecodedLen;
+		out += 2;
+		UrlPathParser::DecodePath(uri, out, true);
+		out += RoundUpOdd(pathDecodedLen) + 1;
+
+		// decode query key=value pairs
+		if (hasQuery)
+		{
+			UrlQueryParser p(uri + pathRawLen + 1);
+			int key, keyLen, val, valLen;
+			while (p.Next(key, keyLen, val, valLen))
+			{
+				*((uint16_t*) out) = keyLen;
+				out += 2;
+				p.DecodeKey(key, out, true);
+				out += RoundUpOdd(keyLen) + 1;
+
+				*((uint16_t*) out) = valLen;
+				out += 2;
+				p.DecodeVal(val, out, true);
+				out += RoundUpOdd(valLen) + 1;
+			}
+		}
+
+		*((uint16_t*) out) = EndOfQueryMarker;
+		out += 2;
+		HTTPBRIDGE_ASSERT(out == _CachedURI + bufLen);
+		return true;
+
+		/*
+		int decodedPathLen = 0;
+		int queryStart = 0;
+		int numQ = 0;
+		int numV = 0;
+		int decodedQVLen = 0;
+		bool inKey = true;
+		for (int i = 0; uri[i] && i < 65536; i++)
+		{
+			if (uri[i] == '%' && uri[i + 1] != 0 && uri[i + 2] != 0)
+			{
+				i += 2;
+				continue;
+			}
+			if (queryStart == 0)
+			{
+				if (uri[i] == '?')
+				{
+					queryStart = i;
+					continue;
+				}
+				decodedPathLen++;
+			}
+			else
+			{
+				if (uri[i] == '&')
+				{
+					inKey = true;
+					numQ++;
+				}
+				else if (uri[i] == '=' && inKey)
+				{
+					inKey = false;
+					numV++;
+				}
+				else
+					decodedQVLen++;
+			}
+		}
+
+		// Parse the path and query
+		_CachedURI = (char*) hb::Alloc(decodedPathLen + numQV + decodedQVLen + numQV * sizeof(int), Backend->Log);
+		bool inPath = true;
+		bool inKey = true;
+		int j = 0;
+		int k = 0;
+		int* valuePos = (int*) _CachedURI;
+		j = numQV * sizeof(int);
+
+		for (int i = 0; uri[i] && i < 65536; i++)
+		{
+			uint8_t raw = uri[i];
+			uint8_t dec = uri[i];
+			if (uri[i] == '%' && uri[i + 1] != 0 && uri[i + 2] != 0)
+			{
+				dec = HexToInt(uri[i + 1]) * 16 + HexToInt(uri[i + 2]);
+				i += 2;
+			}
+			if (inPath)
+			{
+				if (raw == '?')
+				{
+					_CachedURI[j++] = 0;
+					inPath = false;
+					continue;
+				}
+				_CachedURI[j++] = dec;
+			}
+			else
+			{
+				if (raw == '&')
+				{
+
+				}
+				else if (raw == '=')
+				{
+					valuePos[k++] = j;
+				}
+				else
+				{
+					_CachedURI[j++] = dec;
+				}
+			}
+		}
+		*/
 	}
 
 	//////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////

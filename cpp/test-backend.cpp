@@ -36,7 +36,7 @@ public:
 
 	void HandleFrame(hb::InFrame& inframe)
 	{
-		auto match = [&inframe](const char* prefix) { return inframe.Request->Path().find(prefix) == 0; };
+		auto match = [&inframe](const char* prefix) { return strstr(inframe.Request->Path(), prefix) == inframe.Request->Path(); };
 
 		LocalRequest* lr = nullptr;
 		if (inframe.IsHeader)
@@ -45,11 +45,17 @@ public:
 			lr = Requests.at(RequestKey{ inframe.Request->Channel, inframe.Request->Stream });
 
 		if (match("/echo"))			HttpEcho(inframe, lr);
+		else if (match("/control"))	HttpControl(inframe, lr);
 		else if (match("/ping"))	{ hb::Response resp(inframe.Request); resp.Send(); }
 		else if (match("/stop"))
 		{
 			Stop = true;
 			hb::Response resp(inframe.Request);
+			resp.Send();
+		}
+		else
+		{
+			hb::Response resp(inframe.Request, hb::Status404_Not_Found);
 			resp.Send();
 		}
 
@@ -77,6 +83,11 @@ private:
 			resp.SetBody(body.Count, body.Data);
 			resp.Send();
 		}
+	}
+
+	void HttpControl(hb::InFrame& inframe, LocalRequest* lr)
+	{
+		//if (inframe.Request->
 	}
 
 	LocalRequest* StartRequest(hb::InFrame& inframe)

@@ -30,6 +30,21 @@ Build {
 			},
 		}
 
+		local unit_test = Program {
+			Name = "unit-test",
+			Sources = {
+				"cpp/unit-test.cpp",
+				"cpp/http-bridge.cpp",
+			},
+			Includes = {
+				"cpp/flatbuffers/include",
+			},
+			Libs = {
+				{ "Ws2_32.lib"; Config = "win*" },
+				{ "stdc++"; Config = {"*-gcc-*", "*-clang-*"} },
+			},
+		}
+
 		local server = Program {
 			Name = "server",
 			Sources = {

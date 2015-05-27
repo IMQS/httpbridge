@@ -340,6 +340,27 @@ HTTPBRIDGE_API HTTPBRIDGE_NORETURN_PREFIX void BuiltinTrap() HTTPBRIDGE_NORETURN
 #pragma warning(pop)
 #endif
 
+	class HTTPBRIDGE_API UrlPathParser
+	{
+	public:
+		static void MeasurePath(const char* buf, int& rawLen, int& decodedLen);					// Returns the raw and decoded length of everything up to the first ? character
+		static void DecodePath(const char* buf, char* decodedPath, bool addNullTerminator);		// Decodes everything up to the first ? character
+	};
+
+	class HTTPBRIDGE_API UrlQueryParser
+	{
+	public:
+		const char* Src;
+		int			P = 0;
+		
+				UrlQueryParser(const char* s) : Src(s) {}
+		bool	Next(int& key, int& keyDecodedLen, int& val, int& valDecodedLen);
+		void	DecodeKey(int start, char* key, bool addNullTerminator);
+		void	DecodeVal(int start, char* val, bool addNullTerminator);
+		static void	DecodeKey(const char* buf, int start, char* key, bool addNullTerminator);
+		static void	DecodeVal(const char* buf, int start, char* val, bool addNullTerminator);
+	};
+
 	struct StreamKey
 	{
 		uint64_t Channel;
@@ -392,8 +413,16 @@ namespace hb
 		bool				Recv(InFrame& frame);						// Returns true if a frame was received
 		bool				ResendWhenBodyIsDone(InFrame& frame);		// Called by InFrame.ResendWhenBodyIsDone(). Returns false if out of memory.
 		void				RequestDestroyed(const StreamKey& key);		// Intended to be called ONLY by Request's destructor.
+		Logger*				AnyLog();
 
 	private:
+		enum FrameStatus
+		{
+			FrameOK,
+			FrameInvalid,
+			FrameOutOfMemory,
+			FrameURITooLong,
+		};
 		hb::HeaderCacheRecv* HeaderCacheRecv = nullptr;
 		ITransport*			Transport = nullptr;
 		Logger				NullLog;
@@ -405,13 +434,13 @@ namespace hb
 		size_t				BufferedRequestsTotalBytes = 0;		// Total number of body bytes allocated for "BufferedRequests"
 
 		RecvResult			RecvInternal(InFrame& inframe);
-		Logger*				AnyLog();
 		bool				Connect(ITransport* transport, const char* addr);
-		void				UnpackHeader(const httpbridge::TxFrame* txframe, InFrame& inframe);
-		bool				UnpackBody(const httpbridge::TxFrame* txframe, InFrame& inframe);		// Returns false if there is a protocol violation
+		FrameStatus			UnpackHeader(const httpbridge::TxFrame* txframe, InFrame& inframe);
+		FrameStatus			UnpackBody(const httpbridge::TxFrame* txframe, InFrame& inframe);
 		size_t				TotalHeaderBlockSize(const httpbridge::TxFrame* frame);
 		void				LogAndPanic(const char* msg);
 		void				SendResponse(Request& request, StatusCode status);
+		void				SendResponse(uint64_t channel, uint64_t stream, StatusCode status);
 		Request*			GetRequestOrDie(uint64_t channel, uint64_t stream);
 		static StreamKey	MakeStreamKey(uint64_t channel, uint64_t stream);
 		static StreamKey	MakeStreamKey(const Request& request);
@@ -449,7 +478,6 @@ namespace hb
 		};
 
 		hb::Backend*			Backend = nullptr;
-		//hb::RequestStatus		Status = RequestStatus_Receiving;
 		bool					IsBuffered = false;
 		HttpVersion				Version = HttpVersion10;
 		uint64_t				Channel = 0;
@@ -463,6 +491,9 @@ namespace hb
 		// Set a header. The Request object now owns headerBlock, and will Free() it in the destructor
 		// The header block must have a terminal pair in inside in order to make iteration easy.
 		void					Initialize(hb::Backend* backend, HttpVersion version, uint64_t channel, uint64_t stream, int32_t headerCount, const void* headerBlock);
+		
+		// This is called automatically by Backend. Returns false if an element is too long
+		bool					ParseURI();
 
 		// Returns true if the Request object was destroyed
 		bool					DecrementLiveness();
@@ -471,9 +502,16 @@ namespace hb
 		void					Reset();
 
 		const char*				Method() const;		// Returns the method, such as GET or POST
-		const char*				URI() const;		// Returns the URI of the request
+		const char*				URI() const;		// Returns the raw URI of the request
 
-		const std::string&		Path();				// Returns the Path of the request
+		const char*				Path() const;		// Returns the Path of the request
+
+		const char*				QueryParam(const char* key) const;	// Returns the first URL query parameter for the given key, or NULL if none found
+
+		// Use NextQuery to iterate over the query parameters.
+		// Returns zero if there are no more items.
+		// Example: for (auto iter = req->NextQuery(0); iter != 0; iter = req->NextQuery(iter)) {...}
+		int32_t					NextQuery(int32_t iterator, const char*& key, const char*& value) const;
 
 		// Returns the number of headers
 		int32_t					HeaderCount() const { return _HeaderCount == 0 ? 0 : _HeaderCount - NumPseudoHeaderLines; }
@@ -500,10 +538,11 @@ namespace hb
 
 	private:
 		static const int		NumPseudoHeaderLines = 1;
+		static const uint16_t	EndOfQueryMarker = 65535;
 		int32_t					_HeaderCount = 0;
 		const uint8_t*			_HeaderBlock = nullptr;		// First HeaderLine[] array and then the headers themselves
 		int						_Liveness = 2;				// A reference count on Request.
-		std::string				_CachedPath;
+		char*					_CachedURI = nullptr;
 
 		void					Free();
 	};
@@ -523,7 +562,8 @@ namespace hb
 		InFrame();
 		~InFrame();
 
-		void	Reset();	// Calls destructor and re-initializes
+		void	Reset();					// Calls destructor and re-initializes
+		void	DeleteRequestAndReset();	// Forces destruction of the Request object (if any) and then calls Reset
 
 		// Calls Request->Backend->ResentWhenBodyIsDone(this)
 		bool	ResendWhenBodyIsDone();
