@@ -46,17 +46,18 @@ public:
 
 		if (match("/echo"))			HttpEcho(inframe, lr);
 		else if (match("/control"))	HttpControl(inframe, lr);
-		else if (match("/ping"))	{ hb::Response resp(inframe.Request); resp.Send(); }
+		else if (match("/ping"))
+		{
+			Backend->Send(inframe.Request, hb::Status200_OK);
+		}
 		else if (match("/stop"))
 		{
 			Stop = true;
-			hb::Response resp(inframe.Request);
-			resp.Send();
+			Backend->Send(inframe.Request, hb::Status200_OK);
 		}
 		else
 		{
-			hb::Response resp(inframe.Request, hb::Status404_Not_Found);
-			resp.Send();
+			Backend->Send(inframe.Request, hb::Status404_Not_Found);
 		}
 
 		if (inframe.IsLast || inframe.IsAborted)
@@ -90,6 +91,7 @@ private:
 		auto buffer_max = inframe.Request->Query("MaxAutoBufferSize");
 		if (buffer_max != nullptr)
 			Backend->MaxAutoBufferSize = atoi(buffer_max);
+		Backend->Send(inframe.Request, hb::Status200_OK);
 	}
 
 	LocalRequest* StartRequest(hb::InFrame& inframe)
@@ -117,11 +119,6 @@ int main(int argc, char** argv)
 	Server server;
 	server.Backend = &backend;
 
-	if (argc == 2)
-	{
-		if (strcmp(argv[1], "nobuffer")) backend.MaxAutoBufferSize = 0;
-	}
-
 	while (!server.Stop)
 	{
 		if (!backend.IsConnected())
@@ -134,6 +131,10 @@ int main(int argc, char** argv)
 		if (backend.Recv(inframe))
 			server.HandleFrame(inframe);
 	}
+
+	// This is polite. If we don't do this, then our TCP socket can be closed before we've finished transmitting
+	// our final reply, and then the Go test server stalls while waiting for us.
+	hb::SleepNano(10 * 1000 * 1000);
 
 	hb::Shutdown();
 

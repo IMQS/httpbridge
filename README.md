@@ -47,3 +47,23 @@ In order to build your own C++ backend, your need to include the following files
 * `go run cmd/example-server.go`
 * You should now be able to launch the example C++ backend. Once you have both the Go server and C++ backend running,
 you can try `curl localhost:8080`, and you should get a reply.
+
+## Running tests
+There are two test suites. One of them is written in Go, and it is responsible for actually performing HTTP requests
+and having a real C++ backend respond to them.
+The other test suite is pure C++, and it tests a few small an isolated pieces of C++ code.
+
+### Running the pure C++ tests
+Build the unit-test project using tundra, and run the executable.
+
+### Running the Go tests
+* From the "go" directory, run env(.bat/sh)
+* go test httpbridge
+
+The Go test suite automatically compiles the C++ backend tester, and launches it.
+
+If you need to debug the C++ code, that is normally launched by the Go test suite, then you can launch the C++ server
+from a C++ debugger, and then pass the "external_backend" flag to the Go test suite so that it doesn't try to launch the C++ server itself.
+For example: `go test httpbridge -external_backend`
+
+To raise the logging level of the Go server, alter it inside restart() in cpp_test.go

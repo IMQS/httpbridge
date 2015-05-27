@@ -902,6 +902,12 @@ namespace hb
 		return SendResult_All;
 	}
 
+	SendResult Backend::Send(const Request* request, StatusCode status)
+	{
+		Response response(request, status);
+		return Send(response);
+	}
+
 	bool Backend::Recv(InFrame& frame)
 	{
 		frame.Reset();
@@ -919,7 +925,6 @@ namespace hb
 			if (frame.Request->BodyLength == 0)
 			{
 				HTTPBRIDGE_ASSERT(frame.IsLast);
-				//frame.Request->Status = RequestStatus_Received;
 				frame.Request->IsBuffered = true;
 				frame.Request->BodyBuffer.Data = frame.BodyBytes;
 				frame.Request->BodyBuffer.Capacity = frame.BodyBytesLen;
@@ -1593,19 +1598,6 @@ namespace hb
 	// Return false if the decoded length of either the path or any query item exceeds 65534 characters
 	bool Request::ParseURI()
 	{
-		// Split our URI into two pieces, the path section and the query section.
-		// The query section we split into key,value,key,value,... separated by null characters.
-		// During all of this, we decode percent encodings.
-		// Our final result is one buffer, containing all of the split and decoded parts, as well as
-		// a lookup table that helps us find the value for a particular query key.
-		// For example, given the URL /api/fetch/%41xy?key1=val1&%6d=12
-		// ... we end up producing a single buffer containing:
-		//
-		// ValuePos		x,y						an array of int32, which is an offset that points to the value for that entry
-		// Path			/api/fetch/Axy
-		// Keys			key1 m
-		// Query		val1 12					the first characters of these items is pointed to by 'x' and 'y'
-
 		// Decode the URI into Path and Query key=value pairs. We perform percent-decoding here.
 		// Our final output buffer looks like this:
 		// len,path, len,key, len,val, len,key, len,val...
@@ -1673,92 +1665,6 @@ namespace hb
 		out += 2;
 		HTTPBRIDGE_ASSERT(out == _CachedURI + bufLen);
 		return true;
-
-		/*
-		int decodedPathLen = 0;
-		int queryStart = 0;
-		int numQ = 0;
-		int numV = 0;
-		int decodedQVLen = 0;
-		bool inKey = true;
-		for (int i = 0; uri[i] && i < 65536; i++)
-		{
-			if (uri[i] == '%' && uri[i + 1] != 0 && uri[i + 2] != 0)
-			{
-				i += 2;
-				continue;
-			}
-			if (queryStart == 0)
-			{
-				if (uri[i] == '?')
-				{
-					queryStart = i;
-					continue;
-				}
-				decodedPathLen++;
-			}
-			else
-			{
-				if (uri[i] == '&')
-				{
-					inKey = true;
-					numQ++;
-				}
-				else if (uri[i] == '=' && inKey)
-				{
-					inKey = false;
-					numV++;
-				}
-				else
-					decodedQVLen++;
-			}
-		}
-
-		// Parse the path and query
-		_CachedURI = (char*) hb::Alloc(decodedPathLen + numQV + decodedQVLen + numQV * sizeof(int), Backend->Log);
-		bool inPath = true;
-		bool inKey = true;
-		int j = 0;
-		int k = 0;
-		int* valuePos = (int*) _CachedURI;
-		j = numQV * sizeof(int);
-
-		for (int i = 0; uri[i] && i < 65536; i++)
-		{
-			uint8_t raw = uri[i];
-			uint8_t dec = uri[i];
-			if (uri[i] == '%' && uri[i + 1] != 0 && uri[i + 2] != 0)
-			{
-				dec = HexToInt(uri[i + 1]) * 16 + HexToInt(uri[i + 2]);
-				i += 2;
-			}
-			if (inPath)
-			{
-				if (raw == '?')
-				{
-					_CachedURI[j++] = 0;
-					inPath = false;
-					continue;
-				}
-				_CachedURI[j++] = dec;
-			}
-			else
-			{
-				if (raw == '&')
-				{
-
-				}
-				else if (raw == '=')
-				{
-					valuePos[k++] = j;
-				}
-				else
-				{
-					_CachedURI[j++] = dec;
-				}
-			}
-		}
-		*/
 	}
 
 	//////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////

@@ -27,8 +27,12 @@ var pingClient http.Client
 // This is useful when you want to launch test-backend.exe from the C++ debugger
 // go test httpbridge -external_backend
 var external_backend = flag.Bool("external_backend", false, "Use an externally launched backend server")
+var skip_build = flag.Bool("skip_build", false, "Don't build the C++ backend server")
 
 func build_cpp() error {
+	if *skip_build {
+		return nil
+	}
 	//cwd, _ := os.Getwd()
 	//fmt.Printf("pwd = %v\n", cwd)
 	cmd := exec.Command(cpp_test_build[0], cpp_test_build[1:]...)
@@ -63,6 +67,7 @@ func kill_cpp(t *testing.T) {
 		return
 	}
 	if cpp_server != nil {
+		fmt.Printf("Stopping cpp server\n")
 		if t != nil {
 			t.Logf("Stopping cpp server")
 		}
@@ -70,6 +75,7 @@ func kill_cpp(t *testing.T) {
 		io.Copy(ioutil.Discard, resp.Body)
 		resp.Body.Close()
 		cpp_server.Wait()
+		fmt.Printf("cpp server stopped\n")
 		if t != nil {
 			if !cpp_server.ProcessState.Success() {
 				t.Logf("cpp output:\n%v\n", string(cpp_server_out.Bytes()))
@@ -128,12 +134,17 @@ func restart(t *testing.T) {
 		} else {
 			t.Logf("Waiting for backend to come alive... error = %v\n", err)
 		}
-		time.Sleep(100 * time.Millisecond)
+		time.Sleep(50 * time.Millisecond)
 	}
 }
 
-func doPost(t *testing.T, url string, body string) *http.Response {
-	req, err := http.NewRequest("POST", baseUrl+url, bytes.NewReader([]byte(body)))
+func doRequest(t *testing.T, method string, url string, body string) *http.Response {
+	fmt.Printf("%v %v\n", method, url)
+	var bodyReader io.Reader
+	if method == "POST" || method == "PUT" {
+		bodyReader = bytes.NewReader([]byte(body))
+	}
+	req, err := http.NewRequest(method, baseUrl+url, bodyReader)
 	if err != nil {
 		t.Fatalf("%v: Error creating request: %v", url, err)
 	}
@@ -145,8 +156,16 @@ func doPost(t *testing.T, url string, body string) *http.Response {
 	return resp
 }
 
-func testPost(t *testing.T, url string, body string, expectCode int, expectBody string) {
-	resp := doPost(t, url, body)
+func doGet(t *testing.T, url string) *http.Response {
+	return doRequest(t, "GET", url, "")
+}
+
+func doPost(t *testing.T, url string, body string) *http.Response {
+	return doRequest(t, "POST", url, body)
+}
+
+func testRequest(t *testing.T, method string, url string, body string, expectCode int, expectBody string) {
+	resp := doRequest(t, method, url, body)
 	respBodyB, err := ioutil.ReadAll(resp.Body)
 	respBody := string(respBodyB)
 	if err != nil {
@@ -159,6 +178,14 @@ func testPost(t *testing.T, url string, body string, expectCode int, expectBody 
 	if respBody != expectBody {
 		t.Errorf("%v:\nexpected (%v)\nreceived (%v)", url, expectBody, respBody)
 	}
+}
+
+func testPost(t *testing.T, url string, body string, expectCode int, expectBody string) {
+	testRequest(t, "POST", url, body, expectCode, expectBody)
+}
+
+func testGet(t *testing.T, url string, expectCode int, expectBody string) {
+	testRequest(t, "GET", url, "", expectCode, expectBody)
 }
 
 func generateBuf(numBytes int) string {
@@ -179,6 +206,13 @@ func generateBuf(numBytes int) string {
 	return string(buf)
 }
 
+func withCombinations(t *testing.T, f func()) {
+	testGet(t, "/control?MaxAutoBufferSize=50000000", 200, "")
+	f()
+	testGet(t, "/control?MaxAutoBufferSize=0", 200, "")
+	f()
+}
+
 func TestMain(m *testing.M) {
 	if err := setup(); err != nil {
 		fmt.Printf("%v\n", err)
@@ -192,11 +226,13 @@ func TestMain(m *testing.M) {
 func TestEcho(t *testing.T) {
 	restart(t)
 
-	testPost(t, "/echo", "Hello!", 200, "Hello!")
+	withCombinations(t, func() {
+		testPost(t, "/echo", "Hello!", 200, "Hello!")
 
-	smallBuf := generateBuf(5 * 1024)
-	testPost(t, "/echo", smallBuf, 200, smallBuf)
+		smallBuf := generateBuf(5 * 1024)
+		testPost(t, "/echo", smallBuf, 200, smallBuf)
 
-	bigBuf := generateBuf(3 * 1024 * 1024)
-	testPost(t, "/echo", bigBuf, 200, bigBuf)
+		bigBuf := generateBuf(3 * 1024 * 1024)
+		testPost(t, "/echo", bigBuf, 200, bigBuf)
+	})
 }

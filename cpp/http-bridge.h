@@ -410,9 +410,10 @@ namespace hb
 		bool				IsConnected();
 		void				Close();
 		SendResult			Send(Response& response);
-		bool				Recv(InFrame& frame);						// Returns true if a frame was received
-		bool				ResendWhenBodyIsDone(InFrame& frame);		// Called by InFrame.ResendWhenBodyIsDone(). Returns false if out of memory.
-		void				RequestDestroyed(const StreamKey& key);		// Intended to be called ONLY by Request's destructor.
+		SendResult			Send(const Request* request, StatusCode status);	// Convenience method for sending a simple response
+		bool				Recv(InFrame& frame);								// Returns true if a frame was received
+		bool				ResendWhenBodyIsDone(InFrame& frame);				// Called by InFrame.ResendWhenBodyIsDone(). Returns false if out of memory.
+		void				RequestDestroyed(const StreamKey& key);				// Intended to be called ONLY by Request's destructor.
 		Logger*				AnyLog();
 
 	private:
