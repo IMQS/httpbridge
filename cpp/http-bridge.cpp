@@ -33,6 +33,8 @@ namespace hb
 	static const int MaxHeaderKeyLen = 1024;
 	static const int MaxHeaderValueLen = 1024 * 1024;
 
+	const char* Header_Content_Length = "Content-Length";
+
 	void PanicMsg(const char* file, int line, const char* msg)
 	{
 		fprintf(stderr, "httpbridge panic %s:%d: %s\n", file, line, msg);
@@ -170,6 +172,7 @@ namespace hb
 	}
 
 	// Returns the length of the string, excluding the null terminator
+	// You need a buffer of 11 bytes to be able to hold any result, including the null terminator
 	int U32toa(uint32_t v, char* buf, size_t buf_size)
 	{
 		int i = 0;
@@ -196,6 +199,7 @@ namespace hb
 	}
 
 	// Returns the length of the string, excluding the null terminator
+	// You need a buffer of 21 bytes to be able to hold any result, including the null terminator
 	int U64toa(uint64_t v, char* buf, size_t buf_size)
 	{
 		if (v <= 4294967295u)
@@ -851,7 +855,7 @@ namespace hb
 		// Pull items out of CurrentRequests hash map, because we can't iterate over them while deleting them
 		std::vector<Request*> waiting;
 		for (auto& item : CurrentRequests)
-			waiting.push_back(item.second);
+			waiting.push_back(item.second.Request);
 
 		for (auto item : waiting)
 		{
@@ -883,14 +887,39 @@ namespace hb
 
 	SendResult Backend::Send(Response& response)
 	{
-		// TODO: Only if this is the last response frame, THEN decrement liveness (ie once we support streaming responses out)
-		Request* req = GetRequestOrDie(response.Channel, response.Stream);
-		req->DecrementLiveness();
+		// TODO: rate limiting. How? Before attempting to send this frame, we return SendResult_BufferFull,
+		// then we wait for the server to tell us that we are clear to send again. This does imply
+		// that the server would need to tell us also when we are not clear to send.
+		RequestState* rs = GetRequestOrDie(response.Channel, response.Stream);
+		if (rs->ResponseBodyRemaining == ResponseBodyUninitialized)
+		{
+			const char* contentLen = response.HeaderByName("Content-Length");
+			if (contentLen != nullptr)
+			{
+				// If you set Content-Length, then that is the expected length of the response.
+				rs->ResponseBodyRemaining = uatoi64(contentLen);
+			}
+			else
+			{
+				// If you don't set Content-Length, then whatever bytes are inside your response, is the expected length of the response.
+				rs->ResponseBodyRemaining = response.BodyBytes();
+				if ( response.BodyBytes() != 0)
+					response.WriteHeader_ContentLength(response.BodyBytes());
+			}
+		}
+		HTTPBRIDGE_ASSERT(rs->ResponseBodyRemaining >= response.BodyBytes()); // You have sent more data than Content-Length
+		rs->ResponseBodyRemaining -= response.BodyBytes();
+		bool isLast = rs->ResponseBodyRemaining == 0;
+		if (isLast)
+		{
+			rs->Request->DecrementLiveness();
+			rs = nullptr;
+		}
 
 		size_t offset = 0;
 		size_t len = 0;
 		void* buf = nullptr;
-		response.FinishFlatbuffer(len, buf);
+		response.FinishFlatbuffer(len, buf, isLast);
 		while (offset != len)
 		{
 			size_t sent = 0;
@@ -908,6 +937,13 @@ namespace hb
 		return Send(response);
 	}
 
+	size_t Backend::SendBodyPart(const Request* request, size_t len, const void* body)
+	{
+		Response response(request, Status200_OK);
+		response.SetBody(len, body);
+		return Send(response);
+	}
+
 	bool Backend::Recv(InFrame& frame)
 	{
 		frame.Reset();
@@ -920,7 +956,10 @@ namespace hb
 
 		if (frame.IsHeader)
 		{
-			CurrentRequests[streamKey] = frame.Request;
+			RequestState rs;
+			rs.Request = frame.Request;
+			rs.ResponseBodyRemaining = ResponseBodyUninitialized;
+			CurrentRequests[streamKey] = rs;
 
 			if (frame.Request->BodyLength == 0)
 			{
@@ -1005,7 +1044,7 @@ namespace hb
 	{
 		auto cr = CurrentRequests.find(key);
 		HTTPBRIDGE_ASSERT(cr != CurrentRequests.end());
-		Request* request = cr->second;
+		Request* request = cr->second.Request;
 
 		if (request->IsBuffered)
 		{
@@ -1164,7 +1203,7 @@ namespace hb
 				AnyLog()->Logf("Received body bytes for unknown stream [%lld:%lld]", txframe->channel(), txframe->stream());
 				return FrameInvalid;
 			}
-			inframe.Request = cr->second;
+			inframe.Request = cr->second.Request;
 		}
 
 		// Empty body frames are a waste, but not an error. Likely to be the final frame.
@@ -1257,11 +1296,11 @@ namespace hb
 		Send(response);
 	}
 
-	Request* Backend::GetRequestOrDie(uint64_t channel, uint64_t stream)
+	Backend::RequestState* Backend::GetRequestOrDie(uint64_t channel, uint64_t stream)
 	{
 		auto iter = CurrentRequests.find(MakeStreamKey(channel, stream));
 		HTTPBRIDGE_ASSERT(iter != CurrentRequests.end());
-		return iter->second;
+		return &iter->second;
 	}
 
 	StreamKey Backend::MakeStreamKey(uint64_t channel, uint64_t stream)
@@ -1436,7 +1475,7 @@ namespace hb
 		Stream = stream;
 		_HeaderCount = headerCount;
 		_HeaderBlock = (const uint8_t*) headerBlock;
-		const char* contentLength = HeaderByName("Content-Length");
+		const char* contentLength = HeaderByName(Header_Content_Length);
 		if (contentLength != nullptr)
 			BodyLength = (uint64_t) uatoi64(contentLength);
 	}
@@ -1718,6 +1757,13 @@ namespace hb
 		HeaderBuf.Push(0);
 	}
 
+	void Response::WriteHeader_ContentLength(uint64_t contentLength)
+	{
+		char buf[21];
+		u64toa(contentLength, buf);
+		WriteHeader(Header_Content_Length, buf);
+	}
+
 	void Response::SetBody(size_t len, const void* body)
 	{
 		// Ensure sanity, as well as safety because BodyLength is uint32
@@ -1771,7 +1817,7 @@ namespace hb
 		HeaderAt(index, keyLen, key, valLen, val);
 	}
 
-	void Response::FinishFlatbuffer(size_t& len, void*& buf)
+	void Response::FinishFlatbuffer(size_t& len, void*& buf, bool isLast)
 	{
 		HTTPBRIDGE_ASSERT(!IsFlatBufferBuilt);
 
@@ -1800,13 +1846,18 @@ namespace hb
 		}
 		auto linesVector = FBB->CreateVector(lines);
 
+		uint8_t flags = 0;
+		if (isLast)
+			flags |= httpbridge::TxFrameFlags_Final;
+
 		httpbridge::TxFrameBuilder frame(*FBB);
-		frame.add_body(BodyOffset);
-		frame.add_headers(linesVector);
-		frame.add_channel(Channel);
-		frame.add_stream(Stream);
 		frame.add_frametype(httpbridge::TxFrameType_Header);
 		frame.add_version(TranslateVersion(Version));
+		frame.add_flags(flags);
+		frame.add_channel(Channel);
+		frame.add_stream(Stream);
+		frame.add_headers(linesVector);
+		frame.add_body(BodyOffset);
 		auto root = frame.Finish();
 		httpbridge::FinishTxFrameBuffer(*FBB, root);
 		len = FBB->GetSize();
@@ -1833,11 +1884,11 @@ namespace hb
 		// FBB internals here.
 		HTTPBRIDGE_ASSERT(!IsFlatBufferBuilt);
 
-		if (HeaderByName("Content-Length") == nullptr)
+		if (HeaderByName(Header_Content_Length) == nullptr)
 		{
 			char s[11]; // 10 characters needed for 4294967295
 			u32toa(BodyLength, s);
-			WriteHeader("Content-Length", s);
+			WriteHeader(Header_Content_Length, s);
 		}
 
 		// Compute response size

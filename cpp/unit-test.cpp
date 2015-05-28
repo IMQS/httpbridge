@@ -115,7 +115,7 @@ void TestRequestQuerySplitter()
 		SetupRequest(r, back, uri);
 		assert(r.ParseURI());
 		assert(strcmp(r.Path(), path) == 0);
-		assert(r.QueryParam("i_don't_exist") == nullptr);
+		assert(r.Query("i_don't_exist") == nullptr);
 		int32_t iter = 0;
 		const char* key, *val;
 		for (auto p : pairs)
@@ -123,7 +123,7 @@ void TestRequestQuerySplitter()
 			iter = r.NextQuery(iter, key, val);
 			assert(p.first == key);
 			assert(p.second == val);
-			assert(p.second == r.QueryParam(p.first.c_str()));
+			assert(p.second == r.Query(p.first.c_str()));
 		}
 		assert(r.NextQuery(iter, key, val) == 0);
 	};

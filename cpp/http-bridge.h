@@ -206,6 +206,8 @@ HTTPBRIDGE_API HTTPBRIDGE_NORETURN_PREFIX void BuiltinTrap() HTTPBRIDGE_NORETURN
 		Status511_Network_Authentication_Required = 511,		
 	};
 
+	extern const char* Header_Content_Length;
+
 	HTTPBRIDGE_API bool			Startup();								// Must be called before any other httpbridge functions are called
 	HTTPBRIDGE_API void			Shutdown();								// Must be called after all use of httpbridge
 	HTTPBRIDGE_API const char*	VersionString(HttpVersion version);		// Returns HTTP/1.0 HTTP/1.1 HTTP/2.0
@@ -382,8 +384,6 @@ namespace std
 }
 namespace hb
 {
-	typedef std::unordered_map<StreamKey, Request*> StreamToRequestMap;
-
 	/* A backend that wants to receive HTTP/2 requests
 	To connect to an upstream http-bridge server, call Connect("tcp", "host:port")
 	*/
@@ -401,19 +401,20 @@ namespace hb
 		size_t				MaxAutoBufferSize = 16 * 1024 * 1024;		
 
 		// Initial size of receiving buffer, per request. If this value is large, then it becomes trivial for an attacker to cause your server
-		// to exhaust all of it's memory pool, without transmitting much data.
+		// to exhaust all of it's memory pool, without transmitting much data. The initial buffer size is actually min(InitialBufferSize, Content-Length).
 		size_t				InitialBufferSize = 4096;
 
 							Backend();
-							~Backend();							// This calls Close()
+							~Backend();											// This calls Close()
 		bool				Connect(const char* network, const char* addr);
 		bool				IsConnected();
 		void				Close();
 		SendResult			Send(Response& response);
-		SendResult			Send(const Request* request, StatusCode status);	// Convenience method for sending a simple response
-		bool				Recv(InFrame& frame);								// Returns true if a frame was received
-		bool				ResendWhenBodyIsDone(InFrame& frame);				// Called by InFrame.ResendWhenBodyIsDone(). Returns false if out of memory.
-		void				RequestDestroyed(const StreamKey& key);				// Intended to be called ONLY by Request's destructor.
+		SendResult			Send(const Request* request, StatusCode status);					// Convenience method for sending a simple response
+		size_t				SendBodyPart(const Request* request, size_t len, const void* body);	// Stream out the body of a response. Returns the number of bytes sent.
+		bool				Recv(InFrame& frame);												// Returns true if a frame was received
+		bool				ResendWhenBodyIsDone(InFrame& frame);								// Called by InFrame.ResendWhenBodyIsDone(). Returns false if out of memory.
+		void				RequestDestroyed(const StreamKey& key);								// Intended to be called ONLY by Request's destructor.
 		Logger*				AnyLog();
 
 	private:
@@ -424,6 +425,13 @@ namespace hb
 			FrameOutOfMemory,
 			FrameURITooLong,
 		};
+		static const uint64_t ResponseBodyUninitialized = -1;
+		struct RequestState
+		{
+			Request* Request;
+			uint64_t ResponseBodyRemaining;
+		};
+		typedef std::unordered_map<StreamKey, RequestState> StreamToRequestMap;
 		hb::HeaderCacheRecv* HeaderCacheRecv = nullptr;
 		ITransport*			Transport = nullptr;
 		Logger				NullLog;
@@ -442,7 +450,7 @@ namespace hb
 		void				LogAndPanic(const char* msg);
 		void				SendResponse(Request& request, StatusCode status);
 		void				SendResponse(uint64_t channel, uint64_t stream, StatusCode status);
-		Request*			GetRequestOrDie(uint64_t channel, uint64_t stream);
+		RequestState*		GetRequestOrDie(uint64_t channel, uint64_t stream);
 		static StreamKey	MakeStreamKey(uint64_t channel, uint64_t stream);
 		static StreamKey	MakeStreamKey(const Request& request);
 	};
@@ -454,9 +462,9 @@ namespace hb
 
 	The lifetime of a Request object is determined by a liveness count. The liveness count starts out at 2.
 	Liveness is decremented as follows:
-		* When the frame marked as IsLast is destroyed, liveness is decremented by one.
-		* When the response is sent, liveness is decremented by one.
-		* When the frame marked as IsAborted is destroyed, liveness is decremented by two (because aborted streams never get a response).
+		* When the InFrame marked as IsLast is destroyed, liveness is decremented by one.
+		* When the OutFrame marked as IsLast is sent, liveness is decremented by one.
+		* When the InFrame marked as IsAborted is destroyed, liveness is decremented by two (because aborted streams never get a response).
 	If liveness drops to zero, the request object is destroyed, and it is removed from Backend's table of current requests.
 	*/
 	class HTTPBRIDGE_API Request
@@ -576,6 +584,8 @@ namespace hb
 	};
 
 	/* HTTP Response
+	If you don't set a ContentLength header, then Backend implicitly adds a Content-Length header equal to the size
+	of the body data inside the response object. If that size is zero, then no implicit header is added.
 	*/
 	class HTTPBRIDGE_API Response
 	{
@@ -595,10 +605,12 @@ namespace hb
 		void			SetStatus(StatusCode status)														{ Status = status; }
 		void			WriteHeader(const char* key, const char* value);									// Add a header
 		void			WriteHeader(int32_t keyLen, const char* key, int32_t valLen, const char* value);	// Add a header
+		void			WriteHeader_ContentLength(uint64_t contentLength);									// Set the content-length header
 		void			SetBody(size_t len, const void* body);												// Set the entire body.
 		SendResult		Send();																				// Call Backend->Send(this)
 
 		int32_t			HeaderCount() const { return HeaderIndex.Size() / 2; }
+		size_t			BodyBytes() const { return BodyLength; }
 
 		// Fetch a header by name.
 		// Returns null if the header does not exist.
@@ -610,7 +622,7 @@ namespace hb
 		// Both key and val are guaranteed to be null terminated
 		void			HeaderAt(int32_t index, const char*& key, const char*& val) const;
 
-		void			FinishFlatbuffer(size_t& len, void*& buf);
+		void			FinishFlatbuffer(size_t& len, void*& buf, bool isLast);
 		void			SerializeToHttp(size_t& len, void*& buf);											// The returned 'buf' must be freed with free()
 
 	private:
