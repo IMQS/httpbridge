@@ -9,7 +9,13 @@
 
 // The second BREAKME version is useful when debugging
 //#define BREAKME (void)0
-#define BREAKME __debugbreak()
+#ifndef BREAKME
+#	ifdef _MSC_VER
+#		define BREAKME __debugbreak()
+#	else
+#		define BREAKME __builtin_trap()
+#	endif
+#endif
 
 #define assert(exp) (void) ((exp) || (printf("Error: %s:%d:\n %s\n", __FILE__, __LINE__, #exp), BREAKME, exit(1), 0))
 #define run(f) (printf("%-30s\n", #f), f())

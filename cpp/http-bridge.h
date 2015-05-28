@@ -428,8 +428,8 @@ namespace hb
 		static const uint64_t ResponseBodyUninitialized = -1;
 		struct RequestState
 		{
-			Request* Request;
-			uint64_t ResponseBodyRemaining;
+			hb::Request*	Request;
+			uint64_t		ResponseBodyRemaining;
 		};
 		typedef std::unordered_map<StreamKey, RequestState> StreamToRequestMap;
 		hb::HeaderCacheRecv* HeaderCacheRecv = nullptr;
@@ -592,7 +592,7 @@ namespace hb
 	public:
 		typedef uint32_t ByteVectorOffset;
 
-		Backend*			Backend = nullptr;
+		hb::Backend*		Backend = nullptr;
 		HttpVersion			Version = HttpVersion10;
 		uint64_t			Channel = 0;
 		uint64_t			Stream = 0;
