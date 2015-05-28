@@ -108,7 +108,6 @@ private:
 		delete lr;
 		Requests.erase(key);
 	}
-
 };
 
 int main(int argc, char** argv)

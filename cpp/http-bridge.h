@@ -58,8 +58,10 @@ c:\dev\head\otaku\t2-output\win64-2013-debug-default\flatc -g -o go/src -b http-
 
 #include <stdint.h>
 #include <string.h>
-#include <vector>
 #include <unordered_map>
+#include <vector>
+#include <atomic>
+#include <mutex>
 #include <thread>
 
 namespace flatbuffers
@@ -390,19 +392,19 @@ namespace hb
 	class HTTPBRIDGE_API Backend
 	{
 	public:
-		Logger*				Log = nullptr;								// This is not owned by Backend. Backend will never delete this.
+		Logger*				Log = nullptr;								// This is not owned by Backend. Backend will never delete this. Do not change this after Connect() has been called.
 		
 		// Maximum number of bytes that will be allocated for 'ResendWhenBodyIsDone' requests. Total shared by all pending requests.
-		size_t				MaxWaitingBufferTotal = 1024 * 1024 * 1024;
+		std::atomic<size_t>	MaxWaitingBufferTotal = 1024 * 1024 * 1024;
 		
 		// Maximum size of a single request who's body will be automatically sent through 'ResendWhenBodyIsDone'. Set to zero to disable.
 		// If a request is smaller or equal to MaxAutoBufferSize, but our total buffer quota (MaxWaitingBufferTotal) has been exceeded by the queue, then
 		// the request will return with a Status503_Service_Unavailable.
-		size_t				MaxAutoBufferSize = 16 * 1024 * 1024;		
+		std::atomic<size_t>	MaxAutoBufferSize = 16 * 1024 * 1024;
 
 		// Initial size of receiving buffer, per request. If this value is large, then it becomes trivial for an attacker to cause your server
 		// to exhaust all of it's memory pool, without transmitting much data. The initial buffer size is actually min(InitialBufferSize, Content-Length).
-		size_t				InitialBufferSize = 4096;
+		std::atomic<size_t>	InitialBufferSize = 4096;
 
 							Backend();
 							~Backend();											// This calls Close()
@@ -414,7 +416,7 @@ namespace hb
 		size_t				SendBodyPart(const Request* request, size_t len, const void* body);	// Stream out the body of a response. Returns the number of bytes sent.
 		bool				Recv(InFrame& frame);												// Returns true if a frame was received
 		bool				ResendWhenBodyIsDone(InFrame& frame);								// Called by InFrame.ResendWhenBodyIsDone(). Returns false if out of memory.
-		void				RequestDestroyed(const StreamKey& key);								// Intended to be called ONLY by Request's destructor.
+		void				RequestDestroyed(const StreamKey& key);								// Intended to be called ONLY by Request's destructor. Do not call this if you're not "Request".
 		Logger*				AnyLog();
 
 	private:
@@ -432,6 +434,7 @@ namespace hb
 			uint64_t		ResponseBodyRemaining;
 		};
 		typedef std::unordered_map<StreamKey, RequestState> StreamToRequestMap;
+		std::mutex			GiantLock;
 		hb::HeaderCacheRecv* HeaderCacheRecv = nullptr;
 		ITransport*			Transport = nullptr;
 		Logger				NullLog;
@@ -440,7 +443,7 @@ namespace hb
 		size_t				RecvSize = 0;
 		std::thread::id		ThreadId;
 		StreamToRequestMap	CurrentRequests;
-		size_t				BufferedRequestsTotalBytes = 0;		// Total number of body bytes allocated for "BufferedRequests"
+		std::atomic<size_t>	BufferedRequestsTotalBytes = 0;		// Total number of body bytes allocated for "BufferedRequests"
 
 		RecvResult			RecvInternal(InFrame& inframe);
 		bool				Connect(ITransport* transport, const char* addr);

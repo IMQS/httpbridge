@@ -887,9 +887,10 @@ namespace hb
 
 	SendResult Backend::Send(Response& response)
 	{
+		GiantLock.lock();
 		// TODO: rate limiting. How? Before attempting to send this frame, we return SendResult_BufferFull,
 		// then we wait for the server to tell us that we are clear to send again. This does imply
-		// that the server would need to tell us also when we are not clear to send.
+		// that the server would also need to tell us when we are not clear to send.
 		RequestState* rs = GetRequestOrDie(response.Channel, response.Stream);
 		if (rs->ResponseBodyRemaining == ResponseBodyUninitialized)
 		{
@@ -909,10 +910,12 @@ namespace hb
 		}
 		HTTPBRIDGE_ASSERT(rs->ResponseBodyRemaining >= response.BodyBytes()); // You have sent more data than Content-Length
 		rs->ResponseBodyRemaining -= response.BodyBytes();
+		GiantLock.unlock();
+
 		bool isLast = rs->ResponseBodyRemaining == 0;
 		if (isLast)
 		{
-			rs->Request->DecrementLiveness();
+			rs->Request->DecrementLiveness(); // this takes the GiantLock
 			rs = nullptr;
 		}
 
@@ -923,7 +926,9 @@ namespace hb
 		while (offset != len)
 		{
 			size_t sent = 0;
+			GiantLock.lock();
 			auto res = Transport->Send(len - offset, (uint8_t*) buf + offset, sent);
+			GiantLock.unlock();
 			offset += sent;
 			if (res == SendResult_Closed)
 				return res;
@@ -948,6 +953,15 @@ namespace hb
 	{
 		frame.Reset();
 
+		if (!IsConnected())
+			return false;
+
+		// It is not strictly necessary that Recv is called from the same thread that called Connect(). We simply use the
+		// Connect() call as a moment in time when we can record a known thread, and use that to sense-check future
+		// calls to Recv.
+		if (std::this_thread::get_id() != ThreadId)
+			LogAndPanic("Recv() called from a different thread than the one that called Connect()");
+
 		RecvResult res = RecvInternal(frame);
 		if (res != RecvResult_Data)
 			return false;
@@ -959,7 +973,9 @@ namespace hb
 			RequestState rs;
 			rs.Request = frame.Request;
 			rs.ResponseBodyRemaining = ResponseBodyUninitialized;
+			GiantLock.lock();
 			CurrentRequests[streamKey] = rs;
+			GiantLock.unlock();
 
 			if (frame.Request->BodyLength == 0)
 			{
@@ -994,22 +1010,13 @@ namespace hb
 		if (!frame.IsHeader || frame.IsLast || request->BodyLength == 0)
 			LogAndPanic("ResendWhenBodyIsDone may only be called on the first frame of a request (the header frame), with a non-zero body length");
 
-		// You can't make this decision from a different thread. By the time you have
-		// called ResendWhenBodyIsDone(), the backend thread will already have processed subsequent frames
-		// for this request. You need to make this decision from the same thread that is calling Recv, and
-		// you need to make it before calling Recv again.
-		// #TODO: Why is this here? Surely ALL calls to Backend need to be made from the same thread???
-		// Reply: Probably not. It seems like a very desirable property of Backend's API that we can dispatch
-		// requests off to multiple threads, and that those threads can send their replies whenever they're
-		// done, instead of pushing the synchronization burden onto the user of the API.
-		if (std::this_thread::get_id() != ThreadId)
-			LogAndPanic("ResendWhenBodyIsDone called from a thread other than the Backend thread");
-
+		GiantLock.lock();
 		StreamKey key = MakeStreamKey(*request);
 		if (CurrentRequests.find(key) == CurrentRequests.end())
 			LogAndPanic("ResendWhenBodyIsDone called on an unknown request");
+		GiantLock.unlock();
 
-		size_t initialSize = min(InitialBufferSize, (size_t) request->BodyLength);
+		size_t initialSize = min(InitialBufferSize.load(), (size_t) request->BodyLength);
 		initialSize = max(initialSize, frame.BodyBytesLen);
 		initialSize = max(initialSize, (size_t) 16);
 
@@ -1042,6 +1049,7 @@ namespace hb
 
 	void Backend::RequestDestroyed(const StreamKey& key)
 	{
+		GiantLock.lock();
 		auto cr = CurrentRequests.find(key);
 		HTTPBRIDGE_ASSERT(cr != CurrentRequests.end());
 		Request* request = cr->second.Request;
@@ -1054,6 +1062,7 @@ namespace hb
 		}
 
 		CurrentRequests.erase(key);
+		GiantLock.unlock();
 	}
 
 	RecvResult Backend::RecvInternal(InFrame& inframe)
@@ -1078,7 +1087,7 @@ namespace hb
 
 		// Read
 		// TODO: Read exactly one frame at a time. First read 4 bytes for the frame length, and thereafter read only
-		// exactly as much as is necesary for that single frame. Then we don't need to do a memmove, and things become simpler.
+		// exactly as much as is necessary for that single frame. Then we don't need to do a memmove, and things become simpler.
 		size_t read = 0;
 		auto result = Transport->Recv(RecvBufCapacity - RecvSize, read, RecvBuf + RecvSize);
 		if (result == RecvResult_Closed)
@@ -1197,14 +1206,17 @@ namespace hb
 	{
 		if (inframe.Request == nullptr)
 		{
+			GiantLock.lock();
 			auto cr = CurrentRequests.find(MakeStreamKey(txframe->channel(), txframe->stream()));
 			if (cr == CurrentRequests.end())
 			{
 				AnyLog()->Logf("Received body bytes for unknown stream [%lld:%lld]", txframe->channel(), txframe->stream());
+				GiantLock.unlock();
 				return FrameInvalid;
 			}
 			inframe.Request = cr->second.Request;
 		}
+		GiantLock.unlock();
 
 		// Empty body frames are a waste, but not an error. Likely to be the final frame.
 		if (txframe->body() == nullptr)

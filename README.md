@@ -110,7 +110,7 @@ of the response body. When the last byte has been sent, the request object will 
 of this mechanism is that you cannot stream a result without specifying it's size up front (via the
 Content-Length header).
 
-TODO: Finish implementation of this on the Go side, and add a test
+TODO: Finish implementation of streaming responses on the Go side, and add a test
 
 #### Threads
 You must poll Backend from a single thread. The same thread that calls Connect() must also call
@@ -129,4 +129,11 @@ multiple threads. These exact list of functions that are safe to call from multi
 * RequestDestroyed()
 * AnyLog()
 
-TODO: Add appropriate locking inside Backend so that the above statement is actually true.
+TODO: Add a mode to test-backend that executes requests on multiple threads, and see if we can
+get any race conditions to occur.
+
+## TODO
+* Implement rate limiting mechanism, which relies on the HTTP server telling us that the TCP socket
+doesn't want any more data yet. This would require a new kind of frame that gets sent from server
+to backend.
+* Get rid of our weird (len, buf) convention, and stick to the regular C style of (buf, len).
