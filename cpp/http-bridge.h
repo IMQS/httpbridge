@@ -1,30 +1,9 @@
 #pragma once
 #ifndef HTTPBRIDGE_INCLUDED
 #define HTTPBRIDGE_INCLUDED
+
 /*
 
-***************
-* HTTP-Bridge *
-***************
-
-The purpose of this system is to allow one to write HTTP/2-based services without embedding 
-an HTTP/2 server inside your code. This is basically fastcgi for HTTP/2.
-
-The model is this:
-
-You write a program that embeds an HTTP/2 server inside it. Inside that program, you
-run an http-bridge server. That http-bridge server listens on your internal network,
-on some special port.
-
-You write another program that hosts your HTTP API. We call this program a backend.
-From the backend, you use http-bridge to connect to your http-bridge server. You make
-a single TCP connection (or pipe, or 'null' connection) between your backend and your
-server, and all http-bridge traffic flows over that one connection.
-
-Why?
-Not everybody wants to embed an HTTP/2 server inside their programs.
-
-Terms:
 * CLIENT  - A browser or other agent that initiates HTTP/2 connections to a SERVER
 * SERVER  - A genuine HTTP/2 server that accepts connections from a CLIENT and forwards them to a BACKEND
 * BACKEND - An agent that communicates with a SERVER in order to receive requests
@@ -37,16 +16,9 @@ Terms:
 			initiated by a CLIENT must use odd-numbered identifiers. A stream initiated by a BACKEND must
 			use even-numbered identifiers.
 
-Conventions
-Pairs of parameters to a function, where a buffer is specified, are written in the order [length,data]. This is
-opposite to most of the standard C library, where it is [data,length]. HMMM.. WHY? Probably just change this
-to be consistent with libc.
-
 TODO
 1. Support more advanced features of HTTP/2 such as PUSH frames.
-2. Support streaming responses out, instead of being forced to sent the entire response at once
-	(this is a C++ implementation issue, not a protocol issue).
-3. Figure out in which conditions a request will have a body but no Content-Length header. Right now
+2. Figure out in which conditions a request will have a body but no Content-Length header. Right now
 	we're a bit ambivalent on this one, for example we copy Content-Length into Request.BodyLength,
 	but then we rely on the Server to send us a flag indicating that a frame is Final.
 
@@ -129,12 +101,6 @@ HTTPBRIDGE_API HTTPBRIDGE_NORETURN_PREFIX void BuiltinTrap() HTTPBRIDGE_NORETURN
 		RecvResult_Closed,		// The transport channel has been closed by the OS
 	};
 
-	//enum RequestStatus
-	//{
-	//	RequestStatus_Receiving,	// Body is busy being received
-	//	RequestStatus_Received,		// Entire body has been received
-	//};
-
 	enum HttpVersion
 	{
 		HttpVersion10,
@@ -205,7 +171,8 @@ HTTPBRIDGE_API HTTPBRIDGE_NORETURN_PREFIX void BuiltinTrap() HTTPBRIDGE_NORETURN
 		Status508_Loop_Detected = 508,
 		Status509_Unassigned = 509,
 		Status510_Not_Extended = 510,
-		Status511_Network_Authentication_Required = 511,		
+		Status511_Network_Authentication_Required = 511,
+		StatusMeta_BodyPart = 1000,	// Used in a Response message to indicate that this is a body part that is being transmitted
 	};
 
 	extern const char* Header_Content_Length;
@@ -240,8 +207,8 @@ HTTPBRIDGE_API HTTPBRIDGE_NORETURN_PREFIX void BuiltinTrap() HTTPBRIDGE_NORETURN
 
 		virtual				~ITransport();						// This must close the socket/file/pipe/etc
 		virtual bool		Connect(const char* addr) = 0;
-		virtual SendResult	Send(size_t size, const void* data, size_t& sent) = 0;
-		virtual RecvResult	Recv(size_t maxSize, size_t& bytesRead, void* data) = 0;
+		virtual SendResult	Send(const void* data, size_t size, size_t& sent) = 0;
+		virtual RecvResult	Recv(size_t maxSize, void* data, size_t& bytesRead) = 0;
 	};
 
 #ifdef _MSC_VER
@@ -413,7 +380,7 @@ namespace hb
 		void				Close();
 		SendResult			Send(Response& response);
 		SendResult			Send(const Request* request, StatusCode status);					// Convenience method for sending a simple response
-		size_t				SendBodyPart(const Request* request, size_t len, const void* body);	// Stream out the body of a response. Returns the number of bytes sent.
+		size_t				SendBodyPart(const Request* request, const void* body, size_t len);	// Stream out the body of a response. Returns the number of bytes sent.
 		bool				Recv(InFrame& frame);												// Returns true if a frame was received
 		bool				ResendWhenBodyIsDone(InFrame& frame);								// Called by InFrame.ResendWhenBodyIsDone(). Returns false if out of memory.
 		void				RequestDestroyed(const StreamKey& key);								// Intended to be called ONLY by Request's destructor. Do not call this if you're not "Request".
@@ -432,9 +399,16 @@ namespace hb
 		{
 			hb::Request*	Request;
 			uint64_t		ResponseBodyRemaining;
+			bool			IsResponseHeaderSent;
 		};
 		typedef std::unordered_map<StreamKey, RequestState> StreamToRequestMap;
+
+		// GiantLock guards all data structures that are mutable by our various entry points.
 		std::mutex			GiantLock;
+		
+		// TransmitLock guards sending data out over Transport
+		std::mutex			TransmitLock;
+
 		hb::HeaderCacheRecv* HeaderCacheRecv = nullptr;
 		ITransport*			Transport = nullptr;
 		Logger				NullLog;
@@ -496,7 +470,7 @@ namespace hb
 		uint64_t				Stream = 0;
 		uint64_t				BodyLength = 0;			// The total length of the body of this request. This is simply a cache of the Content-Length header.
 		hb::Buffer				BodyBuffer;				// If IsBuffered = true, then BodyBuffer stores the entire body
-
+		
 								Request();
 								~Request();
 
@@ -609,7 +583,8 @@ namespace hb
 		void			WriteHeader(const char* key, const char* value);									// Add a header
 		void			WriteHeader(int32_t keyLen, const char* key, int32_t valLen, const char* value);	// Add a header
 		void			WriteHeader_ContentLength(uint64_t contentLength);									// Set the content-length header
-		void			SetBody(size_t len, const void* body);												// Set the entire body.
+		void			SetBody(const void* body, size_t len);												// Set the entire body.
+		void			SetBodyPart(const void* part, size_t len);											// Set part of the body. Sets Status to StatusMeta_BodyPart
 		SendResult		Send();																				// Call Backend->Send(this)
 
 		int32_t			HeaderCount() const { return HeaderIndex.Size() / 2; }
@@ -625,8 +600,8 @@ namespace hb
 		// Both key and val are guaranteed to be null terminated
 		void			HeaderAt(int32_t index, const char*& key, const char*& val) const;
 
-		void			FinishFlatbuffer(size_t& len, void*& buf, bool isLast);
-		void			SerializeToHttp(size_t& len, void*& buf);											// The returned 'buf' must be freed with free()
+		void			FinishFlatbuffer(void*& buf, size_t& len, bool isLast);
+		void			SerializeToHttp(void*& buf, size_t& len);											// The returned 'buf' must be freed with free()
 
 	private:
 		flatbuffers::FlatBufferBuilder*		FBB = nullptr;

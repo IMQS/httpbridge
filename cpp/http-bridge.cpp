@@ -437,8 +437,8 @@ namespace hb
 
 		virtual				~TransportTCP() override;
 		virtual bool		Connect(const char* addr) override;
-		virtual SendResult	Send(size_t size, const void* data, size_t& sent) override;
-		virtual RecvResult	Recv(size_t maxSize, size_t& read, void* data) override;
+		virtual SendResult	Send(const void* data, size_t size, size_t& sent) override;
+		virtual RecvResult	Recv(size_t maxSize, void* data, size_t& bytesRead) override;
 
 	private:
 		void			Close();
@@ -526,7 +526,7 @@ namespace hb
 		return Socket != InvalidSocket;
 	}
 
-	SendResult TransportTCP::Send(size_t size, const void* data, size_t& sent)
+	hb::SendResult TransportTCP::Send(const void* data, size_t size, size_t& sent)
 	{
 		const char* datab = (const char*) data;
 		sent = 0;
@@ -556,10 +556,10 @@ namespace hb
 		return SendResult_All;
 	}
 
-	RecvResult TransportTCP::Recv(size_t maxSize, size_t& bytesRead, void* data)
+	hb::RecvResult TransportTCP::Recv(size_t maxSize, void* data, size_t& bytesRead)
 	{
 		char* bdata = (char*) data;
-		int bytesReadLocal = 0;
+		bytesRead = 0;
 		while (bytesRead < maxSize)
 		{
 			int try_read = (int) (maxSize - bytesRead < ChunkSize ? maxSize - bytesRead : ChunkSize);
@@ -567,20 +567,29 @@ namespace hb
 			if (read_now == ErrSOCKET_ERROR)
 			{
 				int e = LastError();
+				// Timeout occurs because we've set a read timeout on the socket.
+				// WouldBlock would occur if we were to set the socket to non-blocking.
 				if (e == ErrWOULDBLOCK || e == ErrTIMEOUT)
-					return RecvResult_NoData;
+					break;
 				// #TODO: test possible error codes here - there might be some that are recoverable
+				return RecvResult_Closed;
+			}
+			else if (read_now == 0)
+			{
+				// closed gracefully
 				return RecvResult_Closed;
 			}
 			else
 			{
 				bytesRead += read_now;
-				bytesReadLocal += read_now;
-				if (read_now > 0)
+				// If we received less than we asked for, then it's very likely that there is no more data waiting
+				// for us. In this case, return immediately, instead of facing the prospect of having to wait for
+				// the read timeout to complete.
+				if (read_now < try_read)
 					break;
 			}
 		}
-		return bytesReadLocal ? RecvResult_Data : RecvResult_NoData;
+		return bytesRead == 0 ? RecvResult_NoData : RecvResult_Data;
 	}
 
 	int TransportTCP::LastError()
@@ -592,7 +601,6 @@ namespace hb
 #endif
 	}
 
-	// #TODO: No longer used - get rid of this if that's still true at 1.0
 	bool TransportTCP::SetNonBlocking()
 	{
 #ifdef HTTPBRIDGE_PLATFORM_WINDOWS
@@ -892,7 +900,12 @@ namespace hb
 		// then we wait for the server to tell us that we are clear to send again. This does imply
 		// that the server would also need to tell us when we are not clear to send.
 		RequestState* rs = GetRequestOrDie(response.Channel, response.Stream);
-		if (rs->ResponseBodyRemaining == ResponseBodyUninitialized)
+		bool isResponseHeader = response.Status != StatusMeta_BodyPart;
+		HTTPBRIDGE_ASSERT(isResponseHeader == !rs->IsResponseHeaderSent);
+		if (!isResponseHeader)
+			HTTPBRIDGE_ASSERT(response.HeaderCount() == 0);
+
+		if (isResponseHeader)
 		{
 			const char* contentLen = response.HeaderByName("Content-Length");
 			if (contentLen != nullptr)
@@ -904,7 +917,7 @@ namespace hb
 			{
 				// If you don't set Content-Length, then whatever bytes are inside your response, is the expected length of the response.
 				rs->ResponseBodyRemaining = response.BodyBytes();
-				if ( response.BodyBytes() != 0)
+				if (response.BodyBytes() != 0)
 					response.WriteHeader_ContentLength(response.BodyBytes());
 			}
 		}
@@ -922,17 +935,20 @@ namespace hb
 		size_t offset = 0;
 		size_t len = 0;
 		void* buf = nullptr;
-		response.FinishFlatbuffer(len, buf, isLast);
+		response.FinishFlatbuffer(buf, len, isLast);
+		TransmitLock.lock();
 		while (offset != len)
 		{
 			size_t sent = 0;
-			GiantLock.lock();
-			auto res = Transport->Send(len - offset, (uint8_t*) buf + offset, sent);
-			GiantLock.unlock();
+			auto res = Transport->Send((uint8_t*) buf + offset, len - offset, sent);
 			offset += sent;
 			if (res == SendResult_Closed)
+			{
+				TransmitLock.unlock();
 				return res;
+			}
 		}
+		TransmitLock.unlock();
 		return SendResult_All;
 	}
 
@@ -942,10 +958,10 @@ namespace hb
 		return Send(response);
 	}
 
-	size_t Backend::SendBodyPart(const Request* request, size_t len, const void* body)
+	size_t Backend::SendBodyPart(const Request* request, const void* body, size_t len)
 	{
-		Response response(request, Status200_OK);
-		response.SetBody(len, body);
+		Response response(request, StatusMeta_BodyPart);
+		response.SetBody(body, len);
 		return Send(response);
 	}
 
@@ -973,6 +989,7 @@ namespace hb
 			RequestState rs;
 			rs.Request = frame.Request;
 			rs.ResponseBodyRemaining = ResponseBodyUninitialized;
+			rs.IsResponseHeaderSent = false;
 			GiantLock.lock();
 			CurrentRequests[streamKey] = rs;
 			GiantLock.unlock();
@@ -1089,7 +1106,7 @@ namespace hb
 		// TODO: Read exactly one frame at a time. First read 4 bytes for the frame length, and thereafter read only
 		// exactly as much as is necessary for that single frame. Then we don't need to do a memmove, and things become simpler.
 		size_t read = 0;
-		auto result = Transport->Recv(RecvBufCapacity - RecvSize, read, RecvBuf + RecvSize);
+		auto result = Transport->Recv(RecvBufCapacity - RecvSize, RecvBuf + RecvSize, read);
 		if (result == RecvResult_Closed)
 		{
 			AnyLog()->Logf("Server closed connection");
@@ -1215,8 +1232,8 @@ namespace hb
 				return FrameInvalid;
 			}
 			inframe.Request = cr->second.Request;
+			GiantLock.unlock();
 		}
-		GiantLock.unlock();
 
 		// Empty body frames are a waste, but not an error. Likely to be the final frame.
 		if (txframe->body() == nullptr)
@@ -1771,12 +1788,15 @@ namespace hb
 
 	void Response::WriteHeader_ContentLength(uint64_t contentLength)
 	{
+		// You must first call WriteHeader_ContentLength(), and then call SetBodyPart()
+		HTTPBRIDGE_ASSERT(Status != StatusMeta_BodyPart);
+
 		char buf[21];
 		u64toa(contentLength, buf);
 		WriteHeader(Header_Content_Length, buf);
 	}
 
-	void Response::SetBody(size_t len, const void* body)
+	void Response::SetBody(const void* body, size_t len)
 	{
 		// Ensure sanity, as well as safety because BodyLength is uint32
 		HTTPBRIDGE_ASSERT(len <= 1024 * 1024 * 1024);
@@ -1784,6 +1804,13 @@ namespace hb
 		CreateBuilder();
 		BodyOffset = (ByteVectorOffset) FBB->CreateVector((const uint8_t*) body, len).o;
 		BodyLength = (uint32_t) len;
+	}
+
+	void Response::SetBodyPart(const void* part, size_t len)
+	{
+		SetBody(part, len);
+		if (HeaderCount() == 0)
+			Status = StatusMeta_BodyPart;
 	}
 
 	SendResult Response::Send()
@@ -1829,7 +1856,7 @@ namespace hb
 		HeaderAt(index, keyLen, key, valLen, val);
 	}
 
-	void Response::FinishFlatbuffer(size_t& len, void*& buf, bool isLast)
+	void Response::FinishFlatbuffer(void*& buf, size_t& len, bool isLast)
 	{
 		HTTPBRIDGE_ASSERT(!IsFlatBufferBuilt);
 
@@ -1889,7 +1916,7 @@ namespace hb
 		IsFlatBufferBuilt = true;
 	}
 
-	void Response::SerializeToHttp(size_t& len, void*& buf)
+	void Response::SerializeToHttp(void*& buf, size_t& len)
 	{
 		// This doesn't make any sense. Additionally, we need the guarantee that our
 		// Body is always FBB->GetBufferPointer() + 4, because we're reaching into the

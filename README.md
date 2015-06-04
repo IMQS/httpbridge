@@ -136,4 +136,3 @@ get any race conditions to occur.
 * Implement rate limiting mechanism, which relies on the HTTP server telling us that the TCP socket
 doesn't want any more data yet. This would require a new kind of frame that gets sent from server
 to backend.
-* Get rid of our weird (len, buf) convention, and stick to the regular C style of (buf, len).

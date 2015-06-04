@@ -23,9 +23,11 @@ var cpp_server *exec.Cmd
 var cpp_server_out *bytes.Buffer
 var front_server *Server
 var pingClient http.Client
+var requestClient http.Client
 
 // This is useful when you want to launch test-backend.exe from the C++ debugger
 // go test httpbridge -external_backend
+// Also, make sure to test with at least -cpu 2
 var external_backend = flag.Bool("external_backend", false, "Use an externally launched backend server")
 var skip_build = flag.Bool("skip_build", false, "Don't build the C++ backend server")
 
@@ -53,6 +55,7 @@ func setup() error {
 			return err
 		}
 	}
+
 	return nil
 }
 
@@ -121,6 +124,7 @@ func restart(t *testing.T) {
 	}
 
 	// Wait for backend to come alive
+	time.Sleep(10 * time.Millisecond)
 	for {
 		resp, err := pingClient.Get(baseUrl + "/ping")
 		if err == nil {
@@ -148,30 +152,21 @@ func doRequest(t *testing.T, method string, url string, body string) *http.Respo
 	if err != nil {
 		t.Fatalf("%v: Error creating request: %v", url, err)
 	}
-	client := http.Client{}
-	resp, err := client.Do(req)
+	resp, err := requestClient.Do(req)
 	if err != nil {
 		t.Fatalf("%v: Error executing request: %v", url, err)
 	}
 	return resp
 }
 
-func doGet(t *testing.T, url string) *http.Response {
-	return doRequest(t, "GET", url, "")
-}
-
-func doPost(t *testing.T, url string, body string) *http.Response {
-	return doRequest(t, "POST", url, body)
-}
-
 func testRequest(t *testing.T, method string, url string, body string, expectCode int, expectBody string) {
 	resp := doRequest(t, method, url, body)
+	defer resp.Body.Close()
 	respBodyB, err := ioutil.ReadAll(resp.Body)
 	respBody := string(respBodyB)
 	if err != nil {
 		t.Fatalf("%v: Error reading response body: %v", url, err)
 	}
-	resp.Body.Close()
 	if resp.StatusCode != expectCode {
 		t.Errorf("%v:\nexpected code (%v)\nreceived code (%v)", url, expectCode, resp.StatusCode)
 	}
@@ -225,7 +220,6 @@ func TestMain(m *testing.M) {
 
 func TestEcho(t *testing.T) {
 	restart(t)
-
 	withCombinations(t, func() {
 		testPost(t, "/echo", "Hello!", 200, "Hello!")
 
@@ -235,4 +229,22 @@ func TestEcho(t *testing.T) {
 		bigBuf := generateBuf(3 * 1024 * 1024)
 		testPost(t, "/echo", bigBuf, 200, bigBuf)
 	})
+}
+
+func TestThreadedBackend(t *testing.T) {
+	restart(t)
+	nthreads := 8
+	done := make(chan bool)
+	for i := 0; i < nthreads; i++ {
+		go func() {
+			for j := 0; j < 2000; j++ {
+				msg := fmt.Sprintf("(%v,%v) (Thread: %v, Request number: %v) (%v,%v)", i, j, i, j, i, j)
+				testPost(t, "/echo-thread", msg, 200, msg)
+			}
+			done <- true
+		}()
+	}
+	for i := 0; i < nthreads; i++ {
+		<-done
+	}
 }

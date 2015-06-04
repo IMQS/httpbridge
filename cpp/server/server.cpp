@@ -407,7 +407,7 @@ void Server::HandleRequest(Channel& c)
 
 	size_t len = 0;
 	void* buf = nullptr;
-	resp.SerializeToHttp(len, buf);
+	resp.SerializeToHttp(buf, len);
 	size_t pos = 0;
 	while (pos != len)
 	{

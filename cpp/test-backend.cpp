@@ -5,6 +5,10 @@
 //######################################################
 #include "http-bridge.h"
 #include <stdio.h>
+#include <thread>
+#include <mutex>
+
+const int NumWorkerThreads = 4;
 
 struct RequestKey
 {
@@ -31,12 +35,12 @@ namespace std
 class Server
 {
 public:
-	hb::Backend*	Backend = nullptr;
-	bool			Stop = false;
+	hb::Backend*				Backend = nullptr;
+	bool						Stop = false;
 
 	void HandleFrame(hb::InFrame& inframe)
 	{
-		auto match = [&inframe](const char* prefix) { return strstr(inframe.Request->Path(), prefix) == inframe.Request->Path(); };
+		auto prefix_match = [&inframe](const char* prefix) { return strstr(inframe.Request->Path(), prefix) == inframe.Request->Path(); };
 
 		LocalRequest* lr = nullptr;
 		if (inframe.IsHeader)
@@ -44,16 +48,23 @@ public:
 		else
 			lr = Requests.at(RequestKey{ inframe.Request->Channel, inframe.Request->Stream });
 
-		if (match("/echo"))			HttpEcho(inframe, lr);
-		else if (match("/control"))	HttpControl(inframe, lr);
-		else if (match("/ping"))
+		if (prefix_match("/control"))	HttpControl(inframe, lr);
+		else if (prefix_match("/ping"))
 		{
 			Backend->Send(inframe.Request, hb::Status200_OK);
 		}
-		else if (match("/stop"))
+		else if (prefix_match("/stop"))
 		{
 			Stop = true;
 			Backend->Send(inframe.Request, hb::Status200_OK);
+		}
+		else if (prefix_match("/echo-thread"))
+		{
+			HttpEchoThread(inframe, lr);
+		}
+		else if (prefix_match("/echo"))
+		{
+			HttpEcho(inframe, lr);
 		}
 		else
 		{
@@ -64,12 +75,29 @@ public:
 			EndRequest(inframe);
 	}
 
+	void StartThreads()
+	{
+		Threads.resize(NumWorkerThreads);
+		for (size_t i = 0; i < Threads.size(); i++)
+			Threads[i] = std::thread(WorkerThread, this);
+	}
+
+	void WaitForThreadsToDie()
+	{
+		for (auto& t : Threads)
+			t.join();
+		Threads.clear();
+	}
+
 private:
 	struct LocalRequest
 	{
 		hb::Buffer Body;
 	};
-	std::unordered_map<RequestKey, LocalRequest*> Requests;
+	std::unordered_map<RequestKey, LocalRequest*>	Requests;
+	std::vector<std::thread>						Threads;
+	std::vector<hb::Request*>						ThreadRequestQueue;
+	std::mutex										ThreadRequestQueueLock;
 
 	// Echos the body back
 	void HttpEcho(hb::InFrame& inframe, LocalRequest* lr)
@@ -81,8 +109,19 @@ private:
 		{
 			const hb::Buffer& body = inframe.Request->IsBuffered ? inframe.Request->BodyBuffer : lr->Body;
 			hb::Response resp(inframe.Request);
-			resp.SetBody(body.Count, body.Data);
+			resp.SetBody(body.Data, body.Count);
 			resp.Send();
+		}
+	}
+
+	// Echos the body back, but from one of the worker threads
+	void HttpEchoThread(hb::InFrame& inframe, LocalRequest* lr)
+	{
+		if (inframe.IsLast)
+		{
+			ThreadRequestQueueLock.lock();
+			ThreadRequestQueue.push_back(inframe.Request);
+			ThreadRequestQueueLock.unlock();
 		}
 	}
 
@@ -108,7 +147,59 @@ private:
 		delete lr;
 		Requests.erase(key);
 	}
+
+	static void WorkerThread(Server* server)
+	{
+		int backoffMicroSeconds = 0;
+		unsigned int tick = 0;
+		while (!server->Stop)
+		{
+			tick++;
+			hb::Request* req = nullptr;
+			server->ThreadRequestQueueLock.lock();
+			if (server->ThreadRequestQueue.size() != 0)
+			{
+				req = server->ThreadRequestQueue.back();
+				server->ThreadRequestQueue.pop_back();
+			}
+			server->ThreadRequestQueueLock.unlock();
+
+			if (req != nullptr)
+			{
+				//if (tick % 4 != 0)
+				if (true)
+				{
+					// send response as single frame
+					hb::Response resp(req);
+					resp.SetBody(req->BodyBuffer.Data, req->BodyBuffer.Count);
+					resp.Send();
+				}
+				else
+				{
+					// split response over two frames
+					hb::Response r1(req);
+					int half = (int) req->BodyBuffer.Count / 2;
+					r1.WriteHeader_ContentLength(req->BodyBuffer.Count);
+					r1.SetBodyPart(req->BodyBuffer.Data, half);
+					r1.Send();
+					hb::SleepNano(50 * 1000);
+					hb::Response r2(req);
+					r2.SetBodyPart(req->BodyBuffer.Data + half, req->BodyBuffer.Count - half);
+					r2.Send();
+				}
+			}
+			else
+			{
+				backoffMicroSeconds = 1 + backoffMicroSeconds * 2;
+				if (backoffMicroSeconds > 1000)
+					backoffMicroSeconds = 1000;
+				hb::SleepNano(backoffMicroSeconds * 1000);
+			}
+		}
+	}
+
 };
+
 
 int main(int argc, char** argv)
 {
@@ -117,6 +208,7 @@ int main(int argc, char** argv)
 	hb::Backend backend;
 	Server server;
 	server.Backend = &backend;
+	server.StartThreads();
 
 	while (!server.Stop)
 	{
@@ -130,6 +222,8 @@ int main(int argc, char** argv)
 		if (backend.Recv(inframe))
 			server.HandleFrame(inframe);
 	}
+
+	server.WaitForThreadsToDie();
 
 	// This is polite. If we don't do this, then our TCP socket can be closed before we've finished transmitting
 	// our final reply, and then the Go test server stalls while waiting for us.

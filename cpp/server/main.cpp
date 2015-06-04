@@ -43,7 +43,7 @@ public:
 		printf("%s\n", req.URI());
 		resp.SetStatus(hb::Status200_OK);
 		resp.WriteHeader("Content-Type", "text/plain");
-		resp.SetBody(10, "hello good");
+		resp.SetBody("hello good", 10);
 	}
 };
 
