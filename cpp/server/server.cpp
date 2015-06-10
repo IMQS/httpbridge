@@ -31,6 +31,9 @@ static const int		ErrSOCKET_ERROR = -1;
 #undef min
 #endif
 
+#define TSTART() clock_t tstart = clock()
+#define TEND(name) printf("%3d %s\n", (int) (1000 * (clock() - tstart)) / (int) CLOCKS_PER_SEC, name);
+
 // one millisecond, in nanoseconds
 static const int MillisecondNS = 1000 * 1000;
 
@@ -311,7 +314,9 @@ bool Server::ReadFromChannel(Channel& c)
 {
 	uint8_t* buf = HttpRecvBuf.Preallocate(HttpRecvBufSize);
 	auto parser = GetParser(c);
+	TSTART();
 	int nread = recv(c.Socket, (char*) buf, HttpRecvBufSize, 0);
+	TEND("ReadFromChannel");
 	if (nread == 0)
 	{
 		// socket is closed
@@ -353,7 +358,9 @@ bool Server::ReadFromChannel(Channel& c)
 void Server::ReadFromBackend()
 {
 	uint8_t* dst = BackendRecvBuf.Preallocate(BackendRecvBufSize);
+	TSTART();
 	int nread = recv(BackendSock, (char*) dst, BackendRecvBufSize, 0);
+	TEND("ReadFromBackend");
 	if (nread > 0)
 	{
 		BackendRecvBuf.Count += nread;
@@ -393,7 +400,7 @@ void Server::HandleBackendFrame(uint32_t frameSize, const void* frameBuf)
 	}
 	if (c == nullptr)
 	{
-		fprintf(Log, "Received frame for unknown channel %lld\n", (int64_t) frame->channel());
+		fprintf(Log, "Received frame for unknown channel %d\n", (int) frame->channel());
 		return;
 	}
 
@@ -489,6 +496,7 @@ bool Server::HandleRequestHead(Channel& c)
 
 bool Server::HandleRequestBody(Channel& c, const void* buf, int len)
 {
+	fprintf(Log, "[%d] request body (%d bytes)\n", (int) c.Socket, (int) len);
 	flatbuffers::FlatBufferBuilder fbb;
 	uint8_t flags = 0;
 	if (c.ContentReceived + len == c.ContentLength)
@@ -498,7 +506,9 @@ bool Server::HandleRequestBody(Channel& c, const void* buf, int len)
 	auto root = CreateTxFrame(fbb, httpbridge::TxFrameType_Body, (httpbridge::TxHttpVersion) TranslateVersionToFlatBuffer(c.Version), flags, c.ChannelID, stream, 0, body);
 	FinishTxFrameBuffer(fbb, root);
 	c.ContentReceived += len;
-	return SendFlatbufferToSocket(fbb, BackendSock);
+	bool ok = SendFlatbufferToSocket(fbb, BackendSock);
+	fprintf(Log, "[%d] sent final frame to backend\n", (int) c.Socket);
+	return ok;
 }
 
 void Server::ResetChannel(Channel& c)

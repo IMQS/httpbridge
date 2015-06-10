@@ -124,8 +124,10 @@ func restart(t *testing.T) {
 	}
 
 	// Wait for backend to come alive
+	startWait := time.Now()
+	timeout := 5 * time.Second
 	time.Sleep(10 * time.Millisecond)
-	for {
+	for time.Now().Sub(startWait) < timeout {
 		resp, err := pingClient.Get(baseUrl + "/ping")
 		if err == nil {
 			io.Copy(ioutil.Discard, resp.Body)
@@ -139,6 +141,9 @@ func restart(t *testing.T) {
 			t.Logf("Waiting for backend to come alive... error = %v\n", err)
 		}
 		time.Sleep(50 * time.Millisecond)
+	}
+	if time.Now().Sub(startWait) >= timeout {
+		t.Fatalf("Timed out waiting for backend to come alive")
 	}
 }
 
@@ -160,6 +165,7 @@ func doRequest(t *testing.T, method string, url string, body string) *http.Respo
 }
 
 func testRequest(t *testing.T, method string, url string, body string, expectCode int, expectBody string) {
+	fmt.Printf("r: %v %v\n", method, url)
 	resp := doRequest(t, method, url, body)
 	defer resp.Body.Close()
 	respBodyB, err := ioutil.ReadAll(resp.Body)

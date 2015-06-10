@@ -23,6 +23,9 @@
 #undef max
 #endif
 
+#define TSTART() clock_t tstart = clock()
+#define TEND(name) printf("%3d %s\n", (int) (1000 * (clock() - tstart)) / (int) CLOCKS_PER_SEC, name);
+
 namespace hb
 {
 	//////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -568,7 +571,11 @@ namespace hb
 		while (bytesRead < maxSize)
 		{
 			int try_read = (int) (maxSize - bytesRead < ChunkSize ? maxSize - bytesRead : ChunkSize);
+			TSTART();
 			int read_now = recv(Socket, bdata + bytesRead, try_read, 0);
+			TEND("TransportTCP.Recv");
+			if (read_now > 0)
+				printf("TransportTCP.Recv %d bytes\n", read_now);
 			if (read_now == ErrSOCKET_ERROR)
 			{
 				int e = LastError();
@@ -830,6 +837,10 @@ namespace hb
 
 	Backend::Backend()
 	{
+		MaxWaitingBufferTotal.store(1024 * 1024 * 1024);
+		MaxAutoBufferSize.store(16 * 1024 * 1024);
+		InitialBufferSize.store(4096);
+		BufferedRequestsTotalBytes.store(0);
 	}
 
 	Backend::~Backend()

@@ -26,7 +26,7 @@ Build {
 			},
 			Libs = {
 				{ "Ws2_32.lib"; Config = "win*" },
-				{ "stdc++"; Config = {"*-gcc-*", "*-clang-*"} },
+				{ "pthread", "stdc++"; Config = {"*-gcc-*", "*-clang-*"} },
 			},
 		}
 
@@ -65,7 +65,8 @@ Build {
 			},
 		}
 
-		Default(example_backend, server)
+		Default(example_backend)
+		Default(server)
 	end,
 
 	Env = {
