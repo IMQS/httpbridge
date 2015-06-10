@@ -64,11 +64,13 @@ public:
 		void*			Parser = nullptr;
 		hb::Request		Request;
 		uint64_t		ChannelID = 0;
+		bool			IsHeaderFinished = false;
 
 		// Details of the request
 		std::string		Method;
 		std::string		URI;
 		uint64_t		ContentLength = 0;
+		uint64_t		ContentReceived = 0;
 		HttpVersion		Version = HttpVersion10;
 		std::vector<std::pair<std::string, std::string>> Headers;
 	};
@@ -78,9 +80,9 @@ public:
 	// but we also need two slots to see if we have a new channel that can be accept()'ed (one for HTTP and one for Backend).
 	static const int MaxChannels = 62;
 
-	IServerHandler*			Handler;
-	std::atomic<uint32_t>	StopSignal;	// When this is non-zero, then ListenAndRun will exit
-	FILE*					Log;		// All logs are printed here. Default is stdout.
+	IServerHandler*			Handler = nullptr;
+	std::atomic<uint32_t>	StopSignal;			// When this is non-zero, then ListenAndRun will exit
+	FILE*					Log = nullptr;		// All logs are printed here. Default is stdout.
 
 	Server();
 	~Server();
@@ -92,6 +94,9 @@ public:
 	void Stop()							{ StopSignal = 1;  }
 
 private:
+	static const int		HttpRecvBufSize = 65536;
+	static const int		BackendRecvBufSize = 65536;
+
 	socket_t				HttpListenSocket = InvalidSocket;
 	socket_t				BackendListenSocket = InvalidSocket;
 	std::thread				AcceptThread;
@@ -99,6 +104,7 @@ private:
 
 	std::vector<Channel*>	Channels;						// HTTP Channels
 	Buffer					HttpSendBuf;					// Buffer of an HTTP response
+	Buffer					HttpRecvBuf;					// Buffer where we place data received from our HTTP socket
 
 	socket_t				BackendSock = InvalidSocket;	// We only support a single backend connection
 	Buffer					BackendRecvBuf;					// Buffer until we have a whole httpbridge frame
@@ -110,10 +116,13 @@ private:
 	bool ReadFromChannel(Channel& c);	// Returns false if we must close the socket
 	void ReadFromBackend();
 	void HandleBackendFrame(uint32_t frameSize, const void* frameBuf);
-	void HandleRequest(Channel& c);
+	bool HandleRequestHead(Channel& c);
+	bool HandleRequestBody(Channel& c, const void* buf, int len);
 	void ResetChannel(Channel& c);		// Reset channel, so that it can serve another request on the same socket
 	void Close();
 	void CloseSocket(socket_t& sock);
+	bool SendFlatbufferToSocket(flatbuffers::FlatBufferBuilder& fbb, Server::socket_t dest);
+	int  SendToSocket(socket_t dest, const void* buf, int len);
 
 	/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 	// http_parser callbacks

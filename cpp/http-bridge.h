@@ -192,6 +192,7 @@ HTTPBRIDGE_API HTTPBRIDGE_NORETURN_PREFIX void BuiltinTrap() HTTPBRIDGE_NORETURN
 	HTTPBRIDGE_API int			U64toa(uint64_t v, char* buf, size_t bufSize);
 	HTTPBRIDGE_API uint64_t		uatoi64(const char* s, size_t len);
 	HTTPBRIDGE_API uint64_t		uatoi64(const char* s);
+	HTTPBRIDGE_API int			TranslateVersionToFlatBuffer(hb::HttpVersion v);
 
 	class HTTPBRIDGE_API Logger
 	{

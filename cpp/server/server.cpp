@@ -23,6 +23,14 @@ static const int		ErrSOCKET_ERROR = -1;
 #define closesocket close
 #endif
 
+#ifdef max
+#undef max
+#endif
+
+#ifdef min
+#undef min
+#endif
+
 // one millisecond, in nanoseconds
 static const int MillisecondNS = 1000 * 1000;
 
@@ -30,6 +38,20 @@ static const int MillisecondNS = 1000 * 1000;
 static http_parser* GetParser(Server::Channel& c)
 {
 	return (http_parser*) c.Parser;
+}
+
+static bool EqualsNoCase(const char* a, const char* b, int len)
+{
+	for (int i = 0; i != len; i++)
+	{
+		int _a = a[i];
+		int _b = b[i];
+		_a = (_a >= 'A' && _a <= 'Z') ? _a + 'a' - 'A' : _a;
+		_b = (_b >= 'A' && _b <= 'Z') ? _b + 'a' - 'A' : _b;
+		if (_a != _b)
+			return false;
+	}
+	return true;
 }
 
 Server::Server()
@@ -70,8 +92,8 @@ void Server::cb_http_field(void *data, const char *field, size_t flen, const cha
 {
 	Channel* c = (Channel*) data;
 	c->Headers.push_back({ std::string(field, flen), std::string(value, vlen) });
-	//if (flen == 14 && strncmp(field, "Content-Length", 14) == 0)
-	//	c->ContentLength = uatoi64(value, vlen);
+	if (flen == 14 && EqualsNoCase(field, "CONTENT-LENGTH", 14))
+		c->ContentLength = hb::uatoi64(value, vlen);
 }
 
 void Server::cb_request_method(void *data, const char *at, size_t length)
@@ -124,6 +146,7 @@ static void WriteHeaderBlockItem(uint8_t* hblock, Request::HeaderLine* index, in
 void Server::cb_header_done(void *data, const char *at, size_t length)
 {
 	Channel* c = (Channel*) data;
+	c->IsHeaderFinished = true;
 	size_t total = sizeof(uint32_t) * 2 * (c->Headers.size() + 2);	// +1 header line for terminator, and +1 header line for pseudo-first-header-line
 	total += c->Method.length() + c->URI.length() + 2;				// +2 for null terminators
 	for (size_t i = 0; i < c->Headers.size(); i++)
@@ -150,7 +173,6 @@ void Server::cb_header_done(void *data, const char *at, size_t length)
 
 	c->Request.Initialize(nullptr, c->Version, 0, 0, (int32_t) c->Headers.size() + 1, hblock);
 }
-
 
 // http_parser callbacks (end)
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -198,6 +220,7 @@ void Server::AcceptHttp()
 	Channel* chan = new Channel();
 	chan->Socket = newSock;
 	chan->ChannelID = NextChannelID++;
+	chan->IsHeaderFinished = false;
 	auto parser = new http_parser();
 	http_parser_init(parser);
 	parser->data = chan;
@@ -221,6 +244,8 @@ void Server::AcceptBackend()
 	BackendSock = accept(BackendListenSocket, (sockaddr*) &addr, &addr_len);
 	if (BackendSock == InvalidSocket)
 		fprintf(Log, "backend accept() failed: %d\n", LastError());
+	else
+		fprintf(Log, "backend connected on socket [%d]\n", (int) BackendSock);
 }
 
 void Server::Process()
@@ -234,12 +259,17 @@ void Server::Process()
 		if (BackendSock == InvalidSocket)
 		{
 			FD_SET(BackendListenSocket, &readable);
-			maxSocket = BackendListenSocket > maxSocket ? BackendListenSocket : maxSocket;
+			maxSocket = std::max(maxSocket, BackendListenSocket);
+		}
+		else
+		{
+			FD_SET(BackendSock, &readable);
+			maxSocket = std::max(maxSocket, BackendSock);
 		}
 		for (auto c : Channels)
 		{
 			FD_SET(c->Socket, &readable);
-			maxSocket = c->Socket > maxSocket ? c->Socket : maxSocket;
+			maxSocket = std::max(maxSocket, c->Socket);
 		}
 		timeval to;
 		to.tv_sec = 0;
@@ -281,9 +311,9 @@ void Server::Process()
 
 bool Server::ReadFromChannel(Channel& c)
 {
-	char buf[4096];
+	uint8_t* buf = HttpRecvBuf.Preallocate(HttpRecvBufSize);
 	auto parser = GetParser(c);
-	int nread = recv(c.Socket, buf, sizeof(buf), 0);
+	int nread = recv(c.Socket, (char*) buf, HttpRecvBufSize, 0);
 	if (nread == 0)
 	{
 		// socket is closed
@@ -292,16 +322,26 @@ bool Server::ReadFromChannel(Channel& c)
 	}
 	else if (nread > 0)
 	{
-		http_parser_execute(parser, buf, nread, parser->nread);
-		if (!!http_parser_has_error(parser))
+		size_t consumedByHeader = 0;
+		if (!c.IsHeaderFinished)
 		{
-			fprintf(Log, "[%d] http parser error\n", (int) c.Socket);
-			return false;
+			consumedByHeader = http_parser_execute(parser, (const char*) buf, nread, parser->nread);
+			if (!!http_parser_has_error(parser))
+			{
+				fprintf(Log, "[%d] http parser error\n", (int) c.Socket);
+				return false;
+			}
+			if (c.IsHeaderFinished)
+			{
+				if (!HandleRequestHead(c))
+					return false;
+			}
 		}
-		if (!!http_parser_is_finished(parser))
+		// It is normal for IsHeaderFinished to be true immediately after it was false in the block above.
+		if (c.IsHeaderFinished)
 		{
-			HandleRequest(c);
-			ResetChannel(c);
+			if (!HandleRequestBody(c, buf + consumedByHeader, (int) (nread - consumedByHeader)))
+				return false;
 		}
 		return true;
 	}
@@ -314,9 +354,8 @@ bool Server::ReadFromChannel(Channel& c)
 
 void Server::ReadFromBackend()
 {
-	int maxRead = 65536;
-	uint8_t* dst = BackendRecvBuf.Preallocate(maxRead);
-	int nread = recv(BackendSock, (char*) dst, maxRead, 0);
+	uint8_t* dst = BackendRecvBuf.Preallocate(BackendRecvBufSize);
+	int nread = recv(BackendSock, (char*) dst, BackendRecvBufSize, 0);
 	if (nread > 0)
 	{
 		BackendRecvBuf.Count += nread;
@@ -369,13 +408,14 @@ void Server::HandleBackendFrame(uint32_t frameSize, const void* frameBuf)
 		const char* statusStr = (const char*) statusLine->key()->Data();
 		int statusStrLen = (int) statusLine->key()->size();
 		HttpSendBuf.Write(statusStr, statusStrLen);
+		HttpSendBuf.WriteStr(" ");
 
 		hb::StatusCode status = (hb::StatusCode) uatoi64(statusStr, statusStrLen);
 		HttpSendBuf.WriteStr(StatusString(status));
 		HttpSendBuf.WriteStr(CRLF);
 
 		// headers
-		for (uint32_t i = 0; i < frame->headers()->size(); i++)
+		for (uint32_t i = 1; i < frame->headers()->size(); i++)
 		{
 			auto header = frame->headers()->Get(i);
 			HttpSendBuf.Write(header->key()->Data(), header->key()->size());
@@ -398,46 +438,71 @@ void Server::HandleBackendFrame(uint32_t frameSize, const void* frameBuf)
 	}
 }
 
-void Server::HandleRequest(Channel& c)
+bool Server::SendFlatbufferToSocket(flatbuffers::FlatBufferBuilder& fbb, Server::socket_t dest)
+{
+	// Add our frame size to the start of the flatbuffer
+	uint8_t frame_size[4];
+	Write32LE(frame_size, (uint32_t) fbb.GetSize());
+	fbb.PushBytes(frame_size, 4);
+
+	int sent = SendToSocket(dest, fbb.GetBufferPointer(), (int) fbb.GetSize());
+	return sent == fbb.GetSize();
+}
+
+bool Server::HandleRequestHead(Channel& c)
 {
 	fprintf(Log, "[%d] request [%s]\n", (int) c.Socket, c.URI.c_str());
 
-	Response resp;
-	Handler->HandleRequest(c.Request, resp);
+	using namespace httpbridge;
 
-	size_t len = 0;
-	void* buf = nullptr;
-	resp.SerializeToHttp(buf, len);
-	size_t pos = 0;
-	while (pos != len)
+	flatbuffers::FlatBufferBuilder fbb;
+	std::vector<flatbuffers::Offset<TxHeaderLine>> headerLines;
+
+	auto method = fbb.CreateVector((const uint8_t*) c.Method.c_str(), c.Method.length());
+	auto uri = fbb.CreateVector((const uint8_t*) c.URI.c_str(), c.URI.length());
+	headerLines.push_back(CreateTxHeaderLine(fbb, method, uri));
+
+	for (const auto& hl : c.Headers)
 	{
-		size_t trywrite = len - pos;
-		if (trywrite > 1024 * 1024)
-			trywrite = 1024 * 1024;
-		int nwrite = send(c.Socket, (char*) buf + pos, (int) trywrite, 0);
-		if (nwrite > 0)
-		{
-			pos += nwrite;
-		}
-		else if (nwrite < 0)
-		{
-			fprintf(Log, "[%d] send failed: %d\n", (int) c.Socket, LastError());
-			break;
-		}
+		auto key = fbb.CreateVector((const uint8_t*) hl.first.c_str(), hl.first.length());
+		auto val = fbb.CreateVector((const uint8_t*) hl.second.c_str(), hl.second.length());
+		headerLines.push_back(CreateTxHeaderLine(fbb, key, val));
 	}
+	auto headers = fbb.CreateVector(headerLines);
+	
+	uint8_t flags = 0;
+	if (c.ContentLength == 0)
+		flags |= TxFrameFlags_Final;
+	uint64_t stream = 3;
+	auto root = CreateTxFrame(fbb, TxFrameType_Header, (TxHttpVersion) TranslateVersionToFlatBuffer(c.Version), flags, c.ChannelID, stream, headers);
+	FinishTxFrameBuffer(fbb, root);
+	return SendFlatbufferToSocket(fbb, BackendSock);
+}
 
-	Free(buf);
+bool Server::HandleRequestBody(Channel& c, const void* buf, int len)
+{
+	flatbuffers::FlatBufferBuilder fbb;
+	uint8_t flags = 0;
+	if (c.ContentReceived + len == c.ContentLength)
+		flags |= httpbridge::TxFrameFlags_Final;
+	uint64_t stream = 3;
+	auto root = CreateTxFrame(fbb, httpbridge::TxFrameType_Body, (httpbridge::TxHttpVersion) TranslateVersionToFlatBuffer(c.Version), flags, c.ChannelID, stream);
+	FinishTxFrameBuffer(fbb, root);
+	c.ContentReceived += len;
+	return SendFlatbufferToSocket(fbb, BackendSock);
 }
 
 void Server::ResetChannel(Channel& c)
 {
 	http_parser_init(GetParser(c));
-	//c.ContentLength = 0;
+	c.ContentLength = 0;
+	c.ContentReceived = 0;
 	c.Headers.clear();
 	c.Method = "";
 	c.Request.Reset();
 	c.URI = "";
 	c.Version = hb::HttpVersion10;
+	c.IsHeaderFinished = false;
 }
 
 void Server::Close()
@@ -455,6 +520,33 @@ void Server::CloseSocket(socket_t& sock)
 			fprintf(Log, "[%d] closesocket() failed: %d\n", (int) sock, LastError());
 	}
 	sock = InvalidSocket;
+}
+
+int Server::SendToSocket(socket_t dest, const void* buf, int len)
+{
+	int pos = 0;
+	while (pos != len)
+	{
+		int trywrite = len - pos;
+		if (trywrite > 1024 * 1024)
+			trywrite = 1024 * 1024;
+		int nwrite = send(dest, (const char*) buf + pos, (int) trywrite, 0);
+		if (nwrite > 0)
+		{
+			pos += nwrite;
+		}
+		else if (nwrite == 0)
+		{
+			fprintf(Log, "[%d] closed\n", (int) dest);
+			return 0;
+		}
+		else if (nwrite < 0)
+		{
+			fprintf(Log, "[%d] send failed: %d\n", (int) dest, LastError());
+			return pos;
+		}
+	}
+	return pos;
 }
 
 int Server::LastError()
