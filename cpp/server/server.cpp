@@ -299,9 +299,7 @@ void Server::Process()
 			{
 				if (!ReadFromChannel(*c))
 				{
-					closesocket(c->Socket);
-					Channels.erase(Channels.begin() + i);
-					delete c;
+					CloseChannel(c);
 					i--;
 				}
 			}
@@ -394,7 +392,10 @@ void Server::HandleBackendFrame(uint32_t frameSize, const void* frameBuf)
 		}
 	}
 	if (c == nullptr)
+	{
+		fprintf(Log, "Received frame for unknown channel %lld\n", (int64_t) frame->channel());
 		return;
+	}
 
 	if (frame->frametype() == httpbridge::TxFrameType_Header)
 	{
@@ -435,6 +436,13 @@ void Server::HandleBackendFrame(uint32_t frameSize, const void* frameBuf)
 	else
 	{
 		HTTPBRIDGE_PANIC("Unrecognized frame type");
+	}
+
+	int sent = SendToSocket(c->Socket, HttpSendBuf.Data, (int) HttpSendBuf.Count);
+	if (sent != HttpSendBuf.Count)
+	{
+		fprintf(Log, "[%d] channel send error %d\n", (int) c->Socket, LastError());
+		CloseChannel(c);
 	}
 }
 
@@ -486,7 +494,8 @@ bool Server::HandleRequestBody(Channel& c, const void* buf, int len)
 	if (c.ContentReceived + len == c.ContentLength)
 		flags |= httpbridge::TxFrameFlags_Final;
 	uint64_t stream = 3;
-	auto root = CreateTxFrame(fbb, httpbridge::TxFrameType_Body, (httpbridge::TxHttpVersion) TranslateVersionToFlatBuffer(c.Version), flags, c.ChannelID, stream);
+	auto body = fbb.CreateVector<uint8_t>((const uint8_t*) buf, len);
+	auto root = CreateTxFrame(fbb, httpbridge::TxFrameType_Body, (httpbridge::TxHttpVersion) TranslateVersionToFlatBuffer(c.Version), flags, c.ChannelID, stream, 0, body);
 	FinishTxFrameBuffer(fbb, root);
 	c.ContentReceived += len;
 	return SendFlatbufferToSocket(fbb, BackendSock);
@@ -520,6 +529,20 @@ void Server::CloseSocket(socket_t& sock)
 			fprintf(Log, "[%d] closesocket() failed: %d\n", (int) sock, LastError());
 	}
 	sock = InvalidSocket;
+}
+
+void Server::CloseChannel(Channel* c)
+{
+	size_t i = 0;
+	for (; i < Channels.size(); i++)
+	{
+		if (Channels[i] == c)
+			break;
+	}
+	HTTPBRIDGE_ASSERT(i != Channels.size());
+	closesocket(c->Socket);
+	Channels.erase(Channels.begin() + i);
+	delete c;
 }
 
 int Server::SendToSocket(socket_t dest, const void* buf, int len)

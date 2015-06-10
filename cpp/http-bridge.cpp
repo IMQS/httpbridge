@@ -704,6 +704,7 @@ namespace hb
 	void Buffer::EraseFromStart(size_t n)
 	{
 		memmove(Data, Data + n, Count - n);
+		Count -= n;
 	}
 
 	void Buffer::Write(const void* buf, size_t n)

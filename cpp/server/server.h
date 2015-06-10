@@ -121,6 +121,7 @@ private:
 	void ResetChannel(Channel& c);		// Reset channel, so that it can serve another request on the same socket
 	void Close();
 	void CloseSocket(socket_t& sock);
+	void CloseChannel(Channel* c);
 	bool SendFlatbufferToSocket(flatbuffers::FlatBufferBuilder& fbb, Server::socket_t dest);
 	int  SendToSocket(socket_t dest, const void* buf, int len);
 
