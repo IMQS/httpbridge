@@ -297,6 +297,7 @@ HTTPBRIDGE_API HTTPBRIDGE_NORETURN_PREFIX void BuiltinTrap() HTTPBRIDGE_NORETURN
 					Buffer();
 					~Buffer();
 
+		void		Clear();
 		uint8_t*	Preallocate(size_t n);
 		void		EraseFromStart(size_t n);
 		void		Write(const void* buf, size_t n);		// Uses GrowCapacityOrPanic()
@@ -363,16 +364,16 @@ namespace hb
 		Logger*				Log = nullptr;								// This is not owned by Backend. Backend will never delete this. Do not change this after Connect() has been called.
 		
 		// Maximum number of bytes that will be allocated for 'ResendWhenBodyIsDone' requests. Total shared by all pending requests.
-		std::atomic<size_t>	MaxWaitingBufferTotal = 1024 * 1024 * 1024;
+		std::atomic<size_t>	MaxWaitingBufferTotal;
 		
 		// Maximum size of a single request who's body will be automatically sent through 'ResendWhenBodyIsDone'. Set to zero to disable.
 		// If a request is smaller or equal to MaxAutoBufferSize, but our total buffer quota (MaxWaitingBufferTotal) has been exceeded by the queue, then
 		// the request will return with a Status503_Service_Unavailable.
-		std::atomic<size_t>	MaxAutoBufferSize = 16 * 1024 * 1024;
+		std::atomic<size_t>	MaxAutoBufferSize;
 
 		// Initial size of receiving buffer, per request. If this value is large, then it becomes trivial for an attacker to cause your server
 		// to exhaust all of it's memory pool, without transmitting much data. The initial buffer size is actually min(InitialBufferSize, Content-Length).
-		std::atomic<size_t>	InitialBufferSize = 4096;
+		std::atomic<size_t>	InitialBufferSize;
 
 							Backend();
 							~Backend();											// This calls Close()
@@ -413,12 +414,10 @@ namespace hb
 		hb::HeaderCacheRecv* HeaderCacheRecv = nullptr;
 		ITransport*			Transport = nullptr;
 		Logger				NullLog;
-		uint8_t*			RecvBuf = nullptr;
-		size_t				RecvBufCapacity = 0;
-		size_t				RecvSize = 0;
+		hb::Buffer			RecvBuf;
 		std::thread::id		ThreadId;
 		StreamToRequestMap	CurrentRequests;
-		std::atomic<size_t>	BufferedRequestsTotalBytes = 0;		// Total number of body bytes allocated for "BufferedRequests"
+		std::atomic<size_t>	BufferedRequestsTotalBytes;		// Total number of body bytes allocated for "BufferedRequests"
 
 		RecvResult			RecvInternal(InFrame& inframe);
 		bool				Connect(ITransport* transport, const char* addr);

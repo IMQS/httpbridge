@@ -338,8 +338,12 @@ bool Server::ReadFromChannel(Channel& c)
 		// It is normal for IsHeaderFinished to be true immediately after it was false in the block above.
 		if (c.IsHeaderFinished)
 		{
-			if (!HandleRequestBody(c, buf + consumedByHeader, (int) (nread - consumedByHeader)))
-				return false;
+			size_t bodyLen = nread - consumedByHeader;
+			if (bodyLen != 0)
+			{
+				if (!HandleRequestBody(c, buf + consumedByHeader, (int) bodyLen))
+					return false;
+			}
 		}
 		return true;
 	}
@@ -393,7 +397,7 @@ void Server::HandleBackendFrame(uint32_t frameSize, const void* frameBuf)
 	}
 	if (c == nullptr)
 	{
-		fprintf(Log, "Received frame for unknown channel %lld\n", (int64_t) frame->channel());
+		fprintf(Log, "Received frame for unknown channel %d\n", (int) frame->channel());
 		return;
 	}
 
@@ -489,6 +493,7 @@ bool Server::HandleRequestHead(Channel& c)
 
 bool Server::HandleRequestBody(Channel& c, const void* buf, int len)
 {
+	fprintf(Log, "[%d] request body (%d bytes)\n", (int) c.Socket, (int) len);
 	flatbuffers::FlatBufferBuilder fbb;
 	uint8_t flags = 0;
 	if (c.ContentReceived + len == c.ContentLength)

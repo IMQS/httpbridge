@@ -64,9 +64,14 @@ int main(int argc, char** argv)
 				std::string responseBody = "You said: ";
 				if (request->BodyBuffer.Count != 0)
 					responseBody.append((const char*) request->BodyBuffer.Data, request->BodyBuffer.Count);
+				responseBody.append("\n");
 				response.SetBody(responseBody.c_str(), responseBody.size());
 				response.Send();
 				printf("-----------------------------\n");
+			}
+			else
+			{
+				printf("- intermediate frame -\n");
 			}
 		}
 	}

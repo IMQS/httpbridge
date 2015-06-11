@@ -694,6 +694,14 @@ namespace hb
 		Free(Data);
 	}
 	
+	void Buffer::Clear()
+	{
+		Free(Data);
+		Data = nullptr;
+		Count = 0;
+		Capacity = 0;
+	}
+
 	uint8_t* Buffer::Preallocate(size_t n)
 	{
 		while (Count + n > Capacity)
@@ -830,12 +838,15 @@ namespace hb
 
 	Backend::Backend()
 	{
+		MaxWaitingBufferTotal.store(1024 * 1024 * 1024);
+		MaxAutoBufferSize.store(16 * 1024 * 1024);
+		InitialBufferSize.store(4096);
+		BufferedRequestsTotalBytes.store(0);
 	}
 
 	Backend::~Backend()
 	{
 		Close();
-		Free(RecvBuf);
 	}
 
 	Logger* Backend::AnyLog()
@@ -882,7 +893,7 @@ namespace hb
 		Transport = nullptr;
 		delete HeaderCacheRecv;
 		HeaderCacheRecv = nullptr;
-		RecvSize = 0;
+		RecvBuf.Clear();
 	}
 
 	bool Backend::Connect(ITransport* transport, const char* addr)
@@ -1088,47 +1099,47 @@ namespace hb
 		GiantLock.unlock();
 	}
 
+	// TODO: Experiment with reading exactly one frame at a time. First read 4 bytes for the frame length, and thereafter read only
+	// exactly as much as is necessary for that single frame. Then we don't need to do a memmove, and things become simpler.
+	// See if that really produces faster results for average workloads.
 	RecvResult Backend::RecvInternal(InFrame& inframe)
 	{
 		if (Transport == nullptr)
 			return RecvResult_Closed;
 
-		// Grow the receive buffer. We don't expect a frame to be more than 1MB.
-		const size_t initialBufSize = 65536;
-		const size_t maxBufSize = 1024 * 1024;	// maxBufSize must be a power of 2, otherwise the overflow condition below will frequently be triggered
-		if (RecvBufCapacity - RecvSize == 0)
+		const size_t maxRecv = 65536;
+		const size_t maxBufSize = 1024*1024;
+		RecvBuf.Preallocate(maxRecv);
+
+		if (RecvBuf.Count >= maxBufSize)
 		{
-			if (RecvBufCapacity >= maxBufSize)
-			{
-				AnyLog()->Logf("Server is trying to send us a frame larger than %d bytes. Closing connection.", (int) maxBufSize);
-				Close();
-				return RecvResult_Closed;
-			}
-			RecvBufCapacity = RecvBufCapacity == 0 ? initialBufSize : RecvBufCapacity * 2;
-			RecvBuf = (uint8_t*) Realloc(RecvBuf, RecvBufCapacity, Log);
+			AnyLog()->Logf("Server is trying to send us a frame larger than %d bytes. Closing connection.", (int) maxBufSize);
+			Close();
+			return RecvResult_Closed;
 		}
 
-		// Read
-		// TODO: Read exactly one frame at a time. First read 4 bytes for the frame length, and thereafter read only
-		// exactly as much as is necessary for that single frame. Then we don't need to do a memmove, and things become simpler.
-		size_t read = 0;
-		auto result = Transport->Recv(RecvBufCapacity - RecvSize, RecvBuf + RecvSize, read);
-		if (result == RecvResult_Closed)
+		// If we don't have at least one frame ready, then read more
+		if (RecvBuf.Count < 4 || RecvBuf.Count < 4 + Read32LE(RecvBuf.Data))
 		{
-			AnyLog()->Logf("Server closed connection");
-			Close();
-			return result;
+			size_t read = 0;
+			auto result = Transport->Recv(maxRecv, RecvBuf.Data + RecvBuf.Count, read);
+			if (result == RecvResult_Closed)
+			{
+				AnyLog()->Logf("Server closed connection");
+				Close();
+				return result;
+			}
+			RecvBuf.Count += read;
 		}
 
 		// Process frame
-		RecvSize += read;
-		if (RecvSize >= 4)
+		if (RecvBuf.Count >= 4)
 		{
-			uint32_t frameSize = Read32LE(RecvBuf);
-			if (RecvSize >= frameSize)
+			uint32_t frameSize = Read32LE(RecvBuf.Data);
+			if (RecvBuf.Count >= frameSize + 4)
 			{
 				// We have a frame to process.
-				const httpbridge::TxFrame* txframe = httpbridge::GetTxFrame((uint8_t*) RecvBuf + 4);
+				const httpbridge::TxFrame* txframe = httpbridge::GetTxFrame((uint8_t*) RecvBuf.Data + 4);
 				FrameStatus headStatus = FrameOK;
 				FrameStatus bodyStatus = FrameOK;
 				if (txframe->frametype() == httpbridge::TxFrameType_Header)
@@ -1155,8 +1166,7 @@ namespace hb
 					Close();
 					return RecvResult_Closed;
 				}
-				memmove(RecvBuf, RecvBuf + 4 + frameSize, RecvSize - frameSize - 4);
-				RecvSize -= frameSize + 4;
+				RecvBuf.EraseFromStart(4 + frameSize);
 				if (headStatus != FrameOK || bodyStatus != FrameOK)
 				{
 					if (headStatus == FrameURITooLong)
