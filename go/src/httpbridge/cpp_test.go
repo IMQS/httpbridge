@@ -21,6 +21,7 @@ const (
 
 var cpp_server *exec.Cmd
 var cpp_server_out *bytes.Buffer
+var cpp_server_err *bytes.Buffer
 var front_server *Server
 var pingClient http.Client
 var requestClient http.Client
@@ -30,6 +31,8 @@ var requestClient http.Client
 // Also, make sure to test with at least -cpu 2
 var external_backend = flag.Bool("external_backend", false, "Use an externally launched backend server")
 var skip_build = flag.Bool("skip_build", false, "Don't build the C++ backend server")
+var valgrind = flag.Bool("valgrind", false, "Run test-backend through valgrind")
+var verbose_http = flag.Bool("verbose_http", false, "Show verbose http log messages")
 
 func build_cpp() error {
 	if *skip_build {
@@ -79,10 +82,20 @@ func kill_cpp(t *testing.T) {
 		resp.Body.Close()
 		cpp_server.Wait()
 		fmt.Printf("cpp server stopped\n")
-		if t != nil {
-			if !cpp_server.ProcessState.Success() {
-				t.Logf("cpp output:\n%v\n", string(cpp_server_out.Bytes()))
+		success := cpp_server.ProcessState.Success()
+		if !success || *valgrind {
+			msg := fmt.Sprintf("cpp stdout:\n%v\ncpp stderr:\n%v\n", string(cpp_server_out.Bytes()), string(cpp_server_err.Bytes()))
+			if t != nil {
+				t.Log(msg)
+			} else {
+				fmt.Print(msg)
+			}
+		}
+		if !success {
+			if t != nil {
 				t.Fatalf("cpp server exited with non-zero exit code")
+			} else {
+				fmt.Printf("cpp server exited with non-zero exit code")
 			}
 		}
 		//cpp_server.Process.Kill()
@@ -109,15 +122,24 @@ func restart(t *testing.T) {
 		front_server = &Server{}
 		front_server.HttpPort = serverFrontPort
 		front_server.BackendPort = serverBackendPort
-		front_server.Log.Level = LogLevelInfo
+		front_server.Log.Level = LogLevelWarn
 		go front_server.ListenAndServe()
 	}
 
 	// Launch backend
 	if !*external_backend {
-		cpp_server = exec.Command(cpp_test_bin)
+		cmd := cpp_test_bin
+		args := []string{}
+		if *valgrind {
+			cmd = "valgrind"
+			//args = []string{"--leak-check=yes", cpp_test_bin}
+			args = []string{"--tool=helgrind", cpp_test_bin}
+		}
+		cpp_server = exec.Command(cmd, args[0:]...)
 		cpp_server_out = &bytes.Buffer{}
+		cpp_server_err = &bytes.Buffer{}
 		cpp_server.Stdout = cpp_server_out
+		cpp_server.Stderr = cpp_server_err
 		if err := cpp_server.Start(); err != nil {
 			t.Fatalf("Failed to launch cpp backend: %v", err)
 		}
@@ -148,7 +170,9 @@ func restart(t *testing.T) {
 }
 
 func doRequest(t *testing.T, method string, url string, body string) *http.Response {
-	fmt.Printf("%v %v\n", method, url)
+	if *verbose_http {
+		fmt.Printf("%v %v\n", method, url)
+	}
 	var bodyReader io.Reader
 	if method == "POST" || method == "PUT" {
 		bodyReader = bytes.NewReader([]byte(body))
@@ -189,7 +213,7 @@ func testGet(t *testing.T, url string, expectCode int, expectBody string) {
 }
 
 func generateBuf(numBytes int) string {
-	if numBytes > 1024*1024 {
+	if numBytes > 1024*1024 && *verbose_http {
 		fmt.Printf("Generating %v junk buffer\n", numBytes)
 	}
 	buf := make([]byte, 0, numBytes)
@@ -200,7 +224,7 @@ func generateBuf(numBytes int) string {
 		}
 		buf = append(buf, []byte(chunk)...)
 	}
-	if numBytes > 1024*1024 {
+	if numBytes > 1024*1024 && *verbose_http {
 		fmt.Printf("Generation done\n")
 	}
 	return string(buf)
