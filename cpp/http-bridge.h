@@ -297,6 +297,7 @@ HTTPBRIDGE_API HTTPBRIDGE_NORETURN_PREFIX void BuiltinTrap() HTTPBRIDGE_NORETURN
 					Buffer();
 					~Buffer();
 
+		void		Clear();
 		uint8_t*	Preallocate(size_t n);
 		void		EraseFromStart(size_t n);
 		void		Write(const void* buf, size_t n);		// Uses GrowCapacityOrPanic()
@@ -413,9 +414,10 @@ namespace hb
 		hb::HeaderCacheRecv* HeaderCacheRecv = nullptr;
 		ITransport*			Transport = nullptr;
 		Logger				NullLog;
-		uint8_t*			RecvBuf = nullptr;
-		size_t				RecvBufCapacity = 0;
-		size_t				RecvSize = 0;
+		//uint8_t*			RecvBuf = nullptr;
+		//size_t				RecvBufCapacity = 0;
+		//size_t				RecvSize = 0;
+		hb::Buffer			RecvBuf;
 		std::thread::id		ThreadId;
 		StreamToRequestMap	CurrentRequests;
 		std::atomic<size_t>	BufferedRequestsTotalBytes;		// Total number of body bytes allocated for "BufferedRequests"

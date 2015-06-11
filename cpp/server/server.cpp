@@ -314,9 +314,9 @@ bool Server::ReadFromChannel(Channel& c)
 {
 	uint8_t* buf = HttpRecvBuf.Preallocate(HttpRecvBufSize);
 	auto parser = GetParser(c);
-	TSTART();
+	//TSTART();
 	int nread = recv(c.Socket, (char*) buf, HttpRecvBufSize, 0);
-	TEND("ReadFromChannel");
+	//TEND("ReadFromChannel");
 	if (nread == 0)
 	{
 		// socket is closed
@@ -343,8 +343,12 @@ bool Server::ReadFromChannel(Channel& c)
 		// It is normal for IsHeaderFinished to be true immediately after it was false in the block above.
 		if (c.IsHeaderFinished)
 		{
-			if (!HandleRequestBody(c, buf + consumedByHeader, (int) (nread - consumedByHeader)))
-				return false;
+			size_t bodyLen = nread - consumedByHeader;
+			if (bodyLen != 0)
+			{
+				if (!HandleRequestBody(c, buf + consumedByHeader, (int) bodyLen))
+					return false;
+			}
 		}
 		return true;
 	}
@@ -358,9 +362,9 @@ bool Server::ReadFromChannel(Channel& c)
 void Server::ReadFromBackend()
 {
 	uint8_t* dst = BackendRecvBuf.Preallocate(BackendRecvBufSize);
-	TSTART();
+	//TSTART();
 	int nread = recv(BackendSock, (char*) dst, BackendRecvBufSize, 0);
-	TEND("ReadFromBackend");
+	//TEND("ReadFromBackend");
 	if (nread > 0)
 	{
 		BackendRecvBuf.Count += nread;
