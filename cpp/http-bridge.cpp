@@ -1505,6 +1505,7 @@ namespace hb
 
 	Request::Request()
 	{
+		_Liveness = 2;
 	}
 
 	Request::~Request()
@@ -1540,7 +1541,10 @@ namespace hb
 	void Request::Reset()
 	{
 		Free();
-		*this = Request();
+		// Use memcpy to reset ourselves, because atomic<int> _Liveness prevents the compiler
+		// from generating Reset::operator=
+		Request tmp;
+		memcpy(this, &tmp, sizeof(tmp));
 	}
 
 	const char* Request::Method() const

@@ -4,7 +4,7 @@ A small C++ library for implementing an HTTP2 API endpoint.
 We "outsource" the real HTTP2 server to an external agent. The only such agent that presently exists is one that uses Go's HTTP2 infrastructure.
 There is also a tiny HTTP/1.1 server embedded in the code base, that can be suitable for unit tests of your C++ HTTP service.
 
-In your C++ backend, you only need to include one .cpp file and one .h file in order to serve up requests.
+In your C++ backend, you only need to include one .cpp file and three .h files in order to serve up requests.
 
 The C++ backend and the HTTP server communicate via a simple protocol defined on top of Flatbuffers. Only one socket is opened between
 your C++ backend and the Go server.
@@ -24,8 +24,7 @@ FastCGI is an obvious alternative in this domain, but I chose to build something
 
 1. I would need to write a FastCGI server in Go.
 2. There is no clear path on how you'd implement HTTP2 features over FastCGI.
-3. I wanted a nice API in C++ for writing an HTTP service.
-4. This seemed like an interesting thing to build.
+3. I wanted a nice API in C++ for writing an HTTP service. This is harder than it may sound.
 
 ## Building the example C++ backend
 __MSVC:__ `cl -Icpp/flatbuffers/include /EHsc Ws2_32.lib cpp/example-backend.cpp cpp/http-bridge.cpp`  
@@ -52,7 +51,7 @@ you can try `curl localhost:8080`, and you should get a reply.
 ## Running tests
 There are two test suites. One of them is written in Go, and it is responsible for actually performing HTTP requests
 and having a real C++ backend respond to them.
-The other test suite is pure C++, and it tests a few small an isolated pieces of C++ code.
+The other test suite is pure C++, and it tests a few small, isolated pieces of C++ code.
 
 ### Running the pure C++ tests
 Build the unit-test project using tundra, and run the executable.
@@ -61,13 +60,18 @@ Build the unit-test project using tundra, and run the executable.
 * From the "go" directory, run env(.bat/sh)
 * go test httpbridge
 
-The Go test suite automatically compiles the C++ backend tester, and launches it.
+The Go test suite automatically compiles the C++ backend tester (using CL or GCC), and launches it.
 
 If you need to debug the C++ code, that is normally launched by the Go test suite, then you can launch the C++ server
 from a C++ debugger, and then pass the "external_backend" flag to the Go test suite so that it doesn't try to launch the C++ server itself.
 For example: `go test httpbridge -external_backend`
 
 To raise the logging level of the Go server, alter it inside restart() in cpp_test.go
+
+I'm still experimenting with integrating valgrind into the test suite. For right now, you can get some example output by running the tests like this:
+* go test httpbridge -v -valgrind -run Thread
+
+For more details on testing, see testing.md
 
 ## How to write C++ code that uses httpbridge
 httpbridge forces upon you an event-driven model. The events that you wait for are HTTP frames. One or more
@@ -97,9 +101,11 @@ send the response. On the other hand, if this is a GET request, then you will pr
 immediately, because you do not need to wait for the body to be sent, because there is no body. Yet another
 scenario is a POST request that includes a small body. Instead of acting on the first frame, you instead
 wait for the last frame, and send a response on that. The IsLast flag on a frame tells you whether this
-is the last frame for a request. There is one more flag, IsAborted. This tells you that the client has
-disconnected this request, so you should abandon whatever work you were busy doing with this request.
-You must not send a response to an aborted request. For all other requests, you must send a response.
+is the last frame for a request. It is common for IsFirst and IsLast to both be set on a frame, if the entire
+request consists of just one frame (or if the server has buffered up the request for you). There is also one
+other flag: IsAborted. This tells you that the client has disconnected this request, so you should abandon
+whatever work you were busy doing with this request. You must not send a response to an aborted request.
+For all other requests, you must send a response.
 
 #### Sending a response
 Most responses are sent with a single Response object, which includes the entire body of the response.
@@ -117,11 +123,11 @@ You must poll Backend from a single thread. The same thread that calls Connect()
 Recv(). This is merely a sanity check, but httpbridge will panic if this is violated. The intended
 threading model is that you create as many worker threads as you need, and you farm requests
 out to them. As soon as a worker thread is finished with a request, it calls Backend->Send(),
-or the equivalent Response->Send(). You don't need to run multiple threads - it is perfectly
+or the equivalent Response->Send(). However, you don't need to run multiple threads - it is perfectly
 fine to run just one thread.
 
 The functions on Backend that deal with a request/response are all callable from
-multiple threads. These exact list of functions that are safe to call from multiple threads is:
+multiple threads. The exact list of functions that are safe to call from multiple threads is:
 
 * The two Send() functions
 * SendBodyPart()

@@ -443,6 +443,9 @@ namespace hb
 		* When the OutFrame marked as IsLast is sent, liveness is decremented by one.
 		* When the InFrame marked as IsAborted is destroyed, liveness is decremented by two (because aborted streams never get a response).
 	If liveness drops to zero, the request object is destroyed, and it is removed from Backend's table of current requests.
+
+	NOTE: An default-initialized Request object must be memcpy-able. We need to use memcpy because
+	std::atomic<int> (_Liveness) prevents the compiler from generating an operator= for the Request class.
 	*/
 	class HTTPBRIDGE_API Request
 	{
@@ -528,7 +531,7 @@ namespace hb
 		static const uint16_t	EndOfQueryMarker = 65535;
 		int32_t					_HeaderCount = 0;
 		const uint8_t*			_HeaderBlock = nullptr;		// First HeaderLine[] array and then the headers themselves
-		int						_Liveness = 2;				// A reference count on Request.
+		std::atomic<int>		_Liveness;					// A reference count on Request.
 		char*					_CachedURI = nullptr;
 
 		void					Free();

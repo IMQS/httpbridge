@@ -69,17 +69,20 @@ func teardown() {
 }
 
 func kill_cpp(t *testing.T) {
-	if *external_backend {
-		return
-	}
-	if cpp_server != nil {
+	kill_external_backend := true
+	if cpp_server != nil || (*external_backend && kill_external_backend) {
 		fmt.Printf("Stopping cpp server\n")
 		if t != nil {
 			t.Logf("Stopping cpp server")
 		}
-		resp, _ := http.Get(baseUrl + "/stop")
-		io.Copy(ioutil.Discard, resp.Body)
-		resp.Body.Close()
+		resp, err := http.Get(baseUrl + "/stop")
+		if err == nil {
+			io.Copy(ioutil.Discard, resp.Body)
+			resp.Body.Close()
+		}
+	}
+
+	if cpp_server != nil {
 		cpp_server.Wait()
 		fmt.Printf("cpp server stopped\n")
 		success := cpp_server.ProcessState.Success()
@@ -98,7 +101,6 @@ func kill_cpp(t *testing.T) {
 				fmt.Printf("cpp server exited with non-zero exit code")
 			}
 		}
-		//cpp_server.Process.Kill()
 		cpp_server = nil
 		cpp_server_out = nil
 	}
@@ -133,7 +135,7 @@ func restart(t *testing.T) {
 		if *valgrind {
 			cmd = "valgrind"
 			//args = []string{"--leak-check=yes", cpp_test_bin}
-			args = []string{"--tool=helgrind", cpp_test_bin}
+			args = []string{"--tool=helgrind", "--suppressions=../../../valgrind-suppressions", cpp_test_bin}
 		}
 		cpp_server = exec.Command(cmd, args[0:]...)
 		cpp_server_out = &bytes.Buffer{}

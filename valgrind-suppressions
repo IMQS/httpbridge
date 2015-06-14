@@ -1,0 +1,23 @@
+{
+   "Stop" atomic bool #1
+   Helgrind:Race
+   fun:store
+   fun:operator=
+   fun:operator=
+   fun:HandleFrame
+   fun:main
+}
+{
+   "Stop" atomic bool #2
+   Helgrind:Race
+   fun:load
+   fun:operator bool
+   fun:_ZN6Server12WorkerThreadEPS_
+   fun:_M_invoke<0ul>
+   fun:operator()
+   fun:_ZNSt6thread5_ImplISt12_Bind_simpleIFPFvP6ServerES3_EEE6_M_runEv
+   obj:/usr/lib/x86_64-linux-gnu/libstdc++.so.6.0.20
+   obj:/usr/lib/valgrind/vgpreload_helgrind-amd64-linux.so
+   fun:start_thread
+   fun:clone
+}

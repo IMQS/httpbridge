@@ -36,7 +36,12 @@ class Server
 {
 public:
 	hb::Backend*				Backend = nullptr;
-	bool						Stop = false;
+	std::atomic<bool>			Stop;
+
+	Server()
+	{
+		Stop = false;
+	}
 
 	void HandleFrame(hb::InFrame& inframe)
 	{
@@ -215,7 +220,9 @@ int main(int argc, char** argv)
 		if (!backend.IsConnected())
 		{
 			if (!backend.Connect("tcp", "127.0.0.1:8081"))
-				hb::SleepNano(10 * 1000 * 1000);
+				hb::SleepNano(500 * 1000 * 1000);
+			else
+				printf("Connected\n");
 		}
 
 		hb::InFrame inframe;
