@@ -92,7 +92,7 @@ void Server::cb_http_field(void *data, const char *field, size_t flen, const cha
 {
 	Channel* c = (Channel*) data;
 	c->Headers.push_back({ std::string(field, flen), std::string(value, vlen) });
-	if (flen == 14 && EqualsNoCase(field, "CONTENT-LENGTH", 14))
+	if (flen == 14 && EqualsNoCase(field, "content-length", 14))
 		c->ContentLength = hb::uatoi64(value, vlen);
 }
 
@@ -191,7 +191,7 @@ bool Server::CreateSocketAndListen(socket_t& sock, const char* addr, uint16_t po
 	inet_pton(AF_INET, addr, &service.sin_addr);
 	service.sin_port = htons(port);
 
-	int err = bind(sock, (sockaddr*) &service, sizeof(service));
+	int err = ::bind(sock, (sockaddr*) &service, sizeof(service));
 	if (err == ErrSOCKET_ERROR)
 	{
 		fprintf(Log, "bind() on %s:%d failed: %d\n", addr, (int) port, LastError());
@@ -420,6 +420,7 @@ void Server::HandleBackendFrame(uint32_t frameSize, const void* frameBuf)
 		HttpSendBuf.WriteStr(CRLF);
 
 		// headers
+		bool haveContentLength = false;
 		for (uint32_t i = 1; i < frame->headers()->size(); i++)
 		{
 			auto header = frame->headers()->Get(i);
@@ -427,11 +428,18 @@ void Server::HandleBackendFrame(uint32_t frameSize, const void* frameBuf)
 			HttpSendBuf.WriteStr(": ");
 			HttpSendBuf.Write(header->value()->Data(), header->value()->size());
 			HttpSendBuf.WriteStr(CRLF);
+			if (header->key()->size() == 14 && EqualsNoCase((const char*) header->key()->Data(), "CONTENT-LENGTH", 14))
+				haveContentLength = true;
 		}
+		// We must always send Content-Length, otherwise the client can't assume that we've finished
+		// transmitting until he gets a chunk or a close.
+		if (!haveContentLength)
+			HttpSendBuf.WriteStr("Content-Length: 0\r\n");
 		HttpSendBuf.WriteStr(CRLF);
 
 		// body
-		HttpSendBuf.Write(frame->body()->Data(), frame->body()->size());
+		if (frame->body() != nullptr)
+			HttpSendBuf.Write(frame->body()->Data(), frame->body()->size());
 	}
 	else if (frame->frametype() == httpbridge::TxFrameType_Body)
 	{

@@ -20,26 +20,18 @@
 namespace hb
 {
 class Server;
-class IServerHandler;
-
-// An object that responds to Server callbacks
-class HTTPBRIDGE_API IServerHandler
-{
-public:
-	virtual void HandleRequest(Request& req, Response& resp) = 0;
-};
 
 /* A minimal HTTP/1.1 server.
 
 Usage
 
-	* Set Listener to your own implementation of IServerListener
+	* Start a backend server.
 	* Call ListenAndRun()
 	* From a signal handler, or another thread, call Stop(), which will cause ListenAndRun() to return
 
 Threading model
 
-	We do not launch any threads. The server is single-threaded.
+	Server does not launch any threads. The server is single-threaded.
 
 Limitations
 
@@ -80,7 +72,6 @@ public:
 	// but we also need two slots to see if we have a new channel that can be accept()'ed (one for HTTP and one for Backend).
 	static const int MaxChannels = 62;
 
-	IServerHandler*			Handler = nullptr;
 	std::atomic<uint32_t>	StopSignal;			// When this is non-zero, then ListenAndRun will exit
 	FILE*					Log = nullptr;		// All logs are printed here. Default is stdout.
 
@@ -107,7 +98,7 @@ private:
 	Buffer					HttpRecvBuf;					// Buffer where we place data received from our HTTP socket
 
 	socket_t				BackendSock = InvalidSocket;	// We only support a single backend connection
-	Buffer					BackendRecvBuf;					// Buffer until we have a whole httpbridge frame
+	Buffer					BackendRecvBuf;					// Buffer for receiving frames from backend
 
 	bool CreateSocketAndListen(socket_t& sock, const char* addr, uint16_t port);
 	void AcceptHttp();

@@ -35,28 +35,13 @@ void setup_ctrl_c_handler()
 }
 #endif
 
-class MyHandler : public hb::IServerHandler
-{
-public:
-	virtual void HandleRequest(hb::Request& req, hb::Response& resp)
-	{
-		printf("%s\n", req.URI());
-		resp.SetStatus(hb::Status200_OK);
-		resp.WriteHeader("Content-Type", "text/plain");
-		resp.SetBody("hello good", 10);
-	}
-};
-
 int main(int argc, char** argv)
 {
 	setup_ctrl_c_handler();
 
 	hb::Startup();
 
-	MyHandler handler;
-
 	hb::Server server;
-	server.Handler = &handler;
 	SingleServer = &server;
 	server.ListenAndRun("127.0.0.1", 8080, 8081);
 	
