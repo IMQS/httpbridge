@@ -64,12 +64,11 @@ func setup() error {
 
 // process tear-down
 func teardown() {
-	kill_cpp(nil)
+	kill_cpp(nil, true)
 	//kill_front()
 }
 
-func kill_cpp(t *testing.T) {
-	kill_external_backend := true
+func kill_cpp(t *testing.T, kill_external_backend bool) {
 	if cpp_server != nil || (*external_backend && kill_external_backend) {
 		fmt.Printf("Stopping cpp server\n")
 		if t != nil {
@@ -115,7 +114,7 @@ func kill_cpp(t *testing.T) {
 
 func restart(t *testing.T) {
 	//kill_front()
-	kill_cpp(t)
+	kill_cpp(t, false)
 
 	// Launch HTTP server (front-end).
 	// I can't figure out how to properly terminate the net/http serving infrastructure, so we just

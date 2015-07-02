@@ -286,6 +286,30 @@ HTTPBRIDGE_API HTTPBRIDGE_NORETURN_PREFIX void BuiltinTrap() HTTPBRIDGE_NORETURN
 		}
 	};
 
+	// 8-bit immutable string
+	// This class was created in order to provide a decent interface into hb::Request, without
+	// incurring the large number of allocs that std::string would impose on us.
+	class HTTPBRIDGE_API ConstString
+	{
+	private:
+		// By having only a single member, which is a pointer, we can pass this
+		// class directly to printf, when it is expecting a %s.
+		const char* Data;
+	public:
+		ConstString(const char* str) : Data(str) {}
+
+		// Cannot be copied
+		ConstString(const ConstString&) = delete;
+		ConstString& operator=(const ConstString&) = delete;
+
+		bool			StartsWith(const char* s) const;
+		const char*		CStr() const { return Data; }		// This generally looks neater than a (const char*) cast
+
+		bool operator==(const char* b) const	{ return (Data == nullptr && b == nullptr) || (Data != nullptr && b != nullptr && strcmp(Data, b) == 0); }
+		bool operator!=(const char* b) const	{ return !(*this == b); }
+		operator const char*() const			{ return Data; }
+	};
+
 	// Byte buffer.
 	class HTTPBRIDGE_API Buffer
 	{
@@ -478,7 +502,7 @@ namespace hb
 								~Request();
 
 		// Set a header. The Request object now owns headerBlock, and will Free() it in the destructor
-		// The header block must have a terminal pair in inside in order to make iteration easy.
+		// The header block must have a terminal pair inside in order to make iteration easy.
 		void					Initialize(hb::Backend* backend, HttpVersion version, uint64_t channel, uint64_t stream, int32_t headerCount, const void* headerBlock);
 		
 		// This is called automatically by Backend. Returns false if an element is too long
@@ -490,12 +514,12 @@ namespace hb
 		// Free any memory that we own, and then initialize to a newly-constructed Request
 		void					Reset();
 
-		const char*				Method() const;		// Returns the method, such as GET or POST
-		const char*				URI() const;		// Returns the raw URI of the request
+		ConstString				Method() const;		// Returns the method, such as GET or POST
+		ConstString				URI() const;		// Returns the raw URI of the request
 
-		const char*				Path() const;		// Returns the Path of the request
+		ConstString				Path() const;		// Returns the Path of the request
 
-		const char*				Query(const char* key) const;		// Returns the first URL query parameter for the given key, or NULL if none found
+		ConstString				Query(const char* key) const;		// Returns the first URL query parameter for the given key, or NULL if none found
 		std::string				QueryStr(const char* key) const;	// Returns the first URL query parameter for the given key, or an empty string if none found
 
 		// Use NextQuery to iterate over the query parameters.

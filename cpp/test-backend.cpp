@@ -132,7 +132,7 @@ private:
 
 	void HttpControl(hb::InFrame& inframe, LocalRequest* lr)
 	{
-		auto buffer_max = inframe.Request->Query("MaxAutoBufferSize");
+		auto& buffer_max = inframe.Request->Query("MaxAutoBufferSize");
 		if (buffer_max != nullptr)
 			Backend->MaxAutoBufferSize = atoi(buffer_max);
 		Backend->Send(inframe.Request, hb::Status200_OK);

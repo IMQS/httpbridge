@@ -685,6 +685,19 @@ namespace hb
 	//////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 	//////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
+	bool ConstString::StartsWith(const char* s) const
+	{
+		if (Data == nullptr)
+			return s == nullptr || !s[0];
+		int i = 0;
+		for (; Data[i] == s[i] && Data[i]; i++) {}
+		return !s[i];
+	}
+
+	//////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+	//////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+	//////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
 	Buffer::Buffer()
 	{
 	}
@@ -1531,7 +1544,8 @@ namespace hb
 		_Liveness--;
 		if (_Liveness == 0)
 		{
-			Backend->RequestDestroyed(StreamKey{ Channel, Stream });
+			if (Backend != nullptr)
+				Backend->RequestDestroyed(StreamKey{ Channel, Stream });
 			delete this;
 			return true;
 		}
@@ -1547,26 +1561,26 @@ namespace hb
 		memcpy(this, &tmp, sizeof(tmp));
 	}
 
-	const char* Request::Method() const
+	ConstString Request::Method() const
 	{
 		// actually the 'key' of header[0]
 		auto lines = (const HeaderLine*) _HeaderBlock;
 		return (const char*) (_HeaderBlock + lines[0].KeyStart);
 	}
 
-	const char* Request::URI() const
+	ConstString Request::URI() const
 	{
 		// actually the 'value' of header[0]
 		auto lines = (const HeaderLine*) _HeaderBlock;
 		return (const char*) (_HeaderBlock + lines[0].KeyStart + lines[0].KeyLen + 1);
 	}
 
-	const char* Request::Path() const
+	ConstString Request::Path() const
 	{
 		return _CachedURI + 2;
 	}
 
-	const char* Request::Query(const char* key) const
+	ConstString Request::Query(const char* key) const
 	{
 		const char* p = _CachedURI;
 		uint16_t len = *((uint16_t*) p);
@@ -1723,7 +1737,7 @@ namespace hb
 
 		// Alloc buffer and decode path
 		int bufLen = 2 + RoundUpOdd(pathDecodedLen) + 1 + queryTotalBytes + 2;
-		_CachedURI = (char*) hb::Alloc(bufLen, Backend->AnyLog()); // 2+ for the length of the path, 1+ for the null terminator
+		_CachedURI = (char*) hb::Alloc(bufLen, Backend ? Backend->AnyLog() : nullptr); // 2+ for the length of the path, 1+ for the null terminator
 		char* out = _CachedURI;
 		*((uint16_t*) out) = pathDecodedLen;
 		out += 2;
