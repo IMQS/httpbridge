@@ -242,7 +242,7 @@ namespace hb
 	uint64_t uatoi64(const char* s, size_t len)
 	{
 		uint64_t v = 0;
-		for (int i = 0; i < len; i++)
+		for (size_t i = 0; i < len; i++)
 			v = v * 10 + (s[i] - '0');
 		return v;
 	}
@@ -250,7 +250,7 @@ namespace hb
 	uint64_t uatoi64(const char* s)
 	{
 		uint64_t v = 0;
-		for (int i = 0; s[i]; i++)
+		for (size_t i = 0; s[i]; i++)
 			v = v * 10 + (s[i] - '0');
 		return v;
 	}

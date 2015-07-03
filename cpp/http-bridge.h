@@ -305,10 +305,23 @@ HTTPBRIDGE_API HTTPBRIDGE_NORETURN_PREFIX void BuiltinTrap() HTTPBRIDGE_NORETURN
 		bool			StartsWith(const char* s) const;
 		const char*		CStr() const { return Data; }		// This generally looks neater than a (const char*) cast
 
-		bool operator==(const char* b) const	{ return (Data == nullptr && b == nullptr) || (Data != nullptr && b != nullptr && strcmp(Data, b) == 0); }
-		bool operator!=(const char* b) const	{ return !(*this == b); }
-		operator const char*() const			{ return Data; }
+		bool operator==(const ConstString& b) const	{ return (Data == nullptr && b.Data == nullptr) || (Data != nullptr && b.Data != nullptr && strcmp(Data, b.Data) == 0); }
+		bool operator!=(const ConstString& b) const	{ return !(*this == b); }
+
+		operator const char*() const				{ return Data; }
 	};
+
+	inline bool operator==(const ConstString& a, const char* b)				{ return (a.CStr() == nullptr && b == nullptr) || (a.CStr() != nullptr && b != nullptr && strcmp(a.CStr(), b) == 0); }
+	inline bool operator!=(const ConstString& a, const char* b)				{ return !(a == b); }
+
+	inline bool operator==(const char* a, const ConstString& b)				{ return b == a; }
+	inline bool operator!=(const char* a, const ConstString& b)				{ return b != a; }
+
+	inline bool operator==(const ConstString& a, const std::string& b)		{ return (a.CStr() == nullptr && b.size() == 0) || (a.CStr() != nullptr && b.size() != 0 && strcmp(a.CStr(), b.c_str()) == 0); }
+	inline bool operator!=(const ConstString& a, const std::string& b)		{ return !(a == b); }
+
+	inline bool operator==(const std::string& a, const ConstString& b)		{ return b == a; }
+	inline bool operator!=(const std::string& a, const ConstString& b)		{ return b != a; }
 
 	// Byte buffer.
 	class HTTPBRIDGE_API Buffer
