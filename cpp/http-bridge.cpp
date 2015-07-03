@@ -1256,7 +1256,7 @@ namespace hb
 			auto cr = CurrentRequests.find(MakeStreamKey(txframe->channel(), txframe->stream()));
 			if (cr == CurrentRequests.end())
 			{
-				AnyLog()->Logf("Received body bytes for unknown stream [%lld:%lld]", txframe->channel(), txframe->stream());
+				AnyLog()->Logf("Received body bytes for unknown stream [%llu:%llu]", txframe->channel(), txframe->stream());
 				GiantLock.unlock();
 				return FrameInvalid;
 			}
@@ -1273,7 +1273,7 @@ namespace hb
 			Buffer& buf = inframe.Request->BodyBuffer;
 			if (buf.Count + inframe.BodyBytesLen > inframe.Request->BodyLength)
 			{
-				AnyLog()->Logf("Request sent too many body bytes. Ignoring frame [%lld:%lld]", txframe->channel(), txframe->stream());
+				AnyLog()->Logf("Request sent too many body bytes. Ignoring frame [%llu:%llu]", txframe->channel(), txframe->stream());
 				return FrameInvalid;
 			}
 			// Assume that a buffer realloc is going to grow by buf.Capacity (ie 2x growth).
@@ -1285,7 +1285,7 @@ namespace hb
 			if (!buf.TryWrite(txframe->body()->Data(), txframe->body()->size()))
 			{
 				// TODO: figure out a way to terminate the stream right here, with a 503 response
-				AnyLog()->Logf("Failed to allocate memory for body frame [%lld:%lld]", txframe->channel(), txframe->stream());
+				AnyLog()->Logf("Failed to allocate memory for body frame [%llu:%llu]", txframe->channel(), txframe->stream());
 				return FrameOutOfMemory;
 			}
 			BufferedRequestsTotalBytes += buf.Capacity - oldBufCapacity;

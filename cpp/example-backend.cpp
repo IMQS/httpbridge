@@ -52,7 +52,7 @@ int main(int argc, char** argv)
 			else if (inframe.IsLast)
 			{
 				printf("-----------------------------\n");
-				printf("%d %d %s %s %s\n", (int) request->Channel, (int) request->Stream, request->Method(), request->URI(), hb::VersionString(request->Version));
+				printf("%d %d %s %s %s\n", (int) request->Channel, (int) request->Stream, request->Method().CStr(), request->URI().CStr(), hb::VersionString(request->Version));
 				for (int i = 0; i < request->HeaderCount(); i++)
 				{
 					const char *key, *val;

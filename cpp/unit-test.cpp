@@ -20,6 +20,13 @@
 #define assert(exp) (void) ((exp) || (printf("Error: %s:%d:\n %s\n", __FILE__, __LINE__, #exp), BREAKME, exit(1), 0))
 #define run(f) (printf("%-30s\n", #f), f())
 
+void* AllocOrDie(size_t size)
+{
+	void* b = malloc(size);
+	assert(b != nullptr);
+	return b;
+}
+
 void TestUrlQueryParser()
 {
 #define checkparse_points(_k,_kl,_v,_vl) assert(p.Next(k, kl, v, vl) && k == _k && kl == _kl && v == _v && vl == _vl)
@@ -104,7 +111,7 @@ void TestUrlQueryParser()
 
 void SetupRequest(hb::Request& r, hb::Backend& back, const char* uri)
 {
-	char* hblock = (char*) malloc(8 + strlen(uri) + 1);
+	char* hblock = (char*) hb::Alloc(8 + strlen(uri) + 1, nullptr);
 	hb::Request::HeaderLine* lines = (hb::Request::HeaderLine*) hblock;
 	lines[0].KeyStart = 7;
 	lines[0].KeyLen = 0;
@@ -150,7 +157,7 @@ void TestRequestQuerySplitter()
 
 	{
 		// longest possible path
-		char* buf = (char*) malloc(65534 + 1);
+		char* buf = (char*) AllocOrDie(65534 + 1);
 		memset(buf, 1, 65534);
 		buf[65534] = 0;
 		test(buf, buf, {});
@@ -158,7 +165,7 @@ void TestRequestQuerySplitter()
 	}
 	{
 		// path too long
-		char* buf = (char*) malloc(65535 + 1);
+		char* buf = (char*) AllocOrDie(65535 + 1);
 		memset(buf, 1, 65535);
 		buf[65535] = 0;
 		expect_fail(buf);
@@ -166,7 +173,7 @@ void TestRequestQuerySplitter()
 	}
 	{
 		// query too long
-		char* buf = (char*) malloc(65536 + 1);
+		char* buf = (char*) AllocOrDie(65536 + 1);
 		memset(buf, 1, 65536);
 		buf[0] = '?';
 		buf[65536] = 0;
