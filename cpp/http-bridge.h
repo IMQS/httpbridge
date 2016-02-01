@@ -289,6 +289,10 @@ HTTPBRIDGE_API HTTPBRIDGE_NORETURN_PREFIX void BuiltinTrap() HTTPBRIDGE_NORETURN
 	// 8-bit immutable string
 	// This class was created in order to provide a decent interface into hb::Request, without
 	// incurring the large number of allocs that std::string would impose on us.
+	// Because ConstString holds an internal pointer into an hb::Request object, you should never
+	// store these in a data structure that will outlive the Request. Basically, don't store them
+	// anywhere other than on the stack. If you need to store a string, just use your favorite
+	// string class to store it. Don't store a ConstString.
 	class HTTPBRIDGE_API ConstString
 	{
 	private:
@@ -298,9 +302,11 @@ HTTPBRIDGE_API HTTPBRIDGE_NORETURN_PREFIX void BuiltinTrap() HTTPBRIDGE_NORETURN
 	public:
 		ConstString(const char* str) : Data(str) {}
 
-		// Cannot be copied
-		ConstString(const ConstString&) = delete;
-		ConstString& operator=(const ConstString&) = delete;
+		// I tried this, in an attempt to prevent people accidentally storing a ConstString. Unfortunately this doesn't work,
+		// because we need to return "ConstString" from hb::Request::Path(), for example, and in doing so, the compiler needs
+		// to use the copy-constructor. Perhaps there is a clever C++ way around this, but I don't know of any.
+		//ConstString(const ConstString&) = delete;
+		//ConstString& operator=(const ConstString&) = delete;
 
 		bool			StartsWith(const char* s) const;
 		const char*		CStr() const { return Data; }		// This generally looks neater than a (const char*) cast
@@ -619,11 +625,13 @@ namespace hb
 		Response(const Request* request, StatusCode status = Status200_OK);
 		~Response();
 
+		bool			IsOK() const																		{ return Status == Status200_OK; }
 		void			SetStatus(StatusCode status)														{ Status = status; }
-		void			WriteHeader(const char* key, const char* value);									// Add a header
-		void			WriteHeader(int32_t keyLen, const char* key, int32_t valLen, const char* value);	// Add a header
-		void			WriteHeader_ContentLength(uint64_t contentLength);									// Set the content-length header
-		void			SetBody(const void* body, size_t len);												// Set the entire body.
+		void			SetStatusAndBody(StatusCode status, const char* body);								// Sets the status and the body. Typically used for small error messages.
+		void			AddHeader(const char* key, const char* value);										// Add a header
+		void			AddHeader(int32_t keyLen, const char* key, int32_t valLen, const char* value);		// Add a header
+		void			AddHeader_ContentLength(uint64_t contentLength);									// Add a Content-Length header
+		void			SetBody(const void* body, size_t len);												// Set the entire body. Panics if called more than once.
 		void			SetBodyPart(const void* part, size_t len);											// Set part of the body. Sets Status to StatusMeta_BodyPart
 		SendResult		Send();																				// Call Backend->Send(this)
 
@@ -633,6 +641,9 @@ namespace hb
 		// Fetch a header by name.
 		// Returns null if the header does not exist.
 		const char*		HeaderByName(const char* name, int nth = 0) const;
+		
+		// Returns true if a header exists
+		bool			HasHeader(const char* name) const;
 
 		// Both key and val are guaranteed to be null terminated
 		void			HeaderAt(int32_t index, int32_t& keyLen, const char*& key, int32_t& valLen, const char*& val) const;
@@ -641,7 +652,8 @@ namespace hb
 		void			HeaderAt(int32_t index, const char*& key, const char*& val) const;
 
 		void			FinishFlatbuffer(void*& buf, size_t& len, bool isLast);
-		void			SerializeToHttp(void*& buf, size_t& len);											// The returned 'buf' must be freed with free()
+		void			SerializeToHttp(void*& buf, size_t& len);											// The returned 'buf' must be freed with hb::Free()
+		void			GetBody(const void*& buf, size_t& len) const;										// Retrieve a pointer to the Body buffer, as well as it's size
 
 	private:
 		flatbuffers::FlatBufferBuilder*		FBB = nullptr;

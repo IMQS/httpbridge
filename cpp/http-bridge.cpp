@@ -948,7 +948,7 @@ namespace hb
 				// If you don't set Content-Length, then whatever bytes are inside your response, is the expected length of the response.
 				rs->ResponseBodyRemaining = response.BodyBytes();
 				if (response.BodyBytes() != 0)
-					response.WriteHeader_ContentLength(response.BodyBytes());
+					response.AddHeader_ContentLength(response.BodyBytes());
 			}
 		}
 		HTTPBRIDGE_ASSERT(rs->ResponseBodyRemaining >= response.BodyBytes()); // You have sent more data than Content-Length
@@ -1794,16 +1794,22 @@ namespace hb
 			delete FBB;
 	}
 
-	void Response::WriteHeader(const char* key, const char* value)
+	void Response::SetStatusAndBody(StatusCode status, const char* body)
+	{
+		SetStatus(status);
+		SetBody(body, strlen(body));
+	}
+
+	void Response::AddHeader(const char* key, const char* value)
 	{
 		size_t keyLen = strlen(key);
 		size_t valLen = strlen(value);
 		HTTPBRIDGE_ASSERT(keyLen <= MaxHeaderKeyLen);
 		HTTPBRIDGE_ASSERT(valLen <= MaxHeaderValueLen);
-		WriteHeader((int) keyLen, key, (int) valLen, value);
+		AddHeader((int) keyLen, key, (int) valLen, value);
 	}
 
-	void Response::WriteHeader(int32_t keyLen, const char* key, int32_t valLen, const char* value)
+	void Response::AddHeader(int32_t keyLen, const char* key, int32_t valLen, const char* value)
 	{
 		// Ensure that our uint32_t casts down below are safe, and also header sanity
 		HTTPBRIDGE_ASSERT(keyLen <= MaxHeaderKeyLen && valLen <= MaxHeaderValueLen);
@@ -1820,20 +1826,25 @@ namespace hb
 		HeaderBuf.Push(0);
 	}
 
-	void Response::WriteHeader_ContentLength(uint64_t contentLength)
+	void Response::AddHeader_ContentLength(uint64_t contentLength)
 	{
 		// You must first call WriteHeader_ContentLength(), and then call SetBodyPart()
 		HTTPBRIDGE_ASSERT(Status != StatusMeta_BodyPart);
 
 		char buf[21];
 		u64toa(contentLength, buf);
-		WriteHeader(Header_Content_Length, buf);
+		AddHeader(Header_Content_Length, buf);
 	}
 
 	void Response::SetBody(const void* body, size_t len)
 	{
 		// Ensure sanity, as well as safety because BodyLength is uint32
 		HTTPBRIDGE_ASSERT(len <= 1024 * 1024 * 1024);
+
+		// Although it's theoretically possible to allow SetBody to be called multiple times
+		// (ie discard FBB every time) it is so wasteful that we rather force the user to
+		// construct their code in such a manner that this is not necessary.
+		HTTPBRIDGE_ASSERT(BodyOffset == 0 && BodyLength == 0);
 
 		CreateBuilder();
 		BodyOffset = (ByteVectorOffset) FBB->CreateVector((const uint8_t*) body, len).o;
@@ -1865,6 +1876,11 @@ namespace hb
 				return val;
 		}
 		return nullptr;
+	}
+
+	bool Response::HasHeader(const char* name) const
+	{
+		return HeaderByName(name) != nullptr;
 	}
 
 	void Response::HeaderAt(int32_t index, int32_t& keyLen, const char*& key, int32_t& valLen, const char*& val) const
@@ -1961,7 +1977,7 @@ namespace hb
 		{
 			char s[11]; // 10 characters needed for 4294967295
 			u32toa(BodyLength, s);
-			WriteHeader(Header_Content_Length, s);
+			AddHeader(Header_Content_Length, s);
 		}
 
 		// Compute response size
@@ -1980,12 +1996,18 @@ namespace hb
 		len += BodyLength;
 
 		// Write response
-		buf = malloc(len);
+		buf = Alloc(len, Backend ? Backend->AnyLog() : nullptr, true);
 		HTTPBRIDGE_ASSERT(buf != nullptr);
 		uint8_t* out = (uint8_t*) buf;
 		const char* CRLF = "\r\n";
 
-		BufWrite(out, "HTTP/1.1 ", 9);
+		switch (Version)
+		{
+		case HttpVersion10: BufWrite(out, "HTTP/1.0 ", 9); break;
+		case HttpVersion11: BufWrite(out, "HTTP/1.1 ", 9); break;
+		default: HTTPBRIDGE_PANIC("Only HTTP 1 supported for SerializeToHttp");
+		}
+
 		char statusNStr[4];
 		u32toa((uint32_t) Status, statusNStr);
 		BufWrite(out, statusNStr, 3);
@@ -2009,6 +2031,19 @@ namespace hb
 		// Write body
 		uint8_t* flatbuf = FBB->GetBufferPointer();
 		BufWrite(out, flatbuf + 4, BodyLength);
+	}
+
+	void Response::GetBody(const void*& buf, size_t& len) const
+	{
+		len = BodyLength;
+		if (BodyLength == 0)
+		{
+			buf = nullptr;
+		}
+		else
+		{
+			buf = FBB->GetBufferPointer() + BodyOffset;
+		}
 	}
 
 	void Response::CreateBuilder()

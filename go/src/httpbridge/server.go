@@ -281,31 +281,44 @@ func (s *Server) sendBytes(dst io.Writer, buf []byte) error {
 }
 
 func (s *Server) sendResponse(w http.ResponseWriter, req *http.Request, backend *backendConnection, channel, stream uint64, responseChan responseChan) {
-	lastMsg := time.Now()
 	remainingBytes := int64(1)
+	hasTimedOut := false
 
-	for remainingBytes > 0 {
+	for remainingBytes > 0 && !hasTimedOut {
 		select {
 		case frame := <-responseChan:
-			lastMsg = time.Now()
 			res := s.sendResponseFrame(w, req, backend, channel, stream, frame)
 			if frame.Frametype() == TxFrameTypeHeader {
 				remainingBytes = res
 			} else {
 				remainingBytes -= res
 			}
-			return
-		case <-time.After(time.Second * 3):
-			if time.Now().Sub(lastMsg) > s.BackendTimeout {
-				http.Error(w, "Backend timeout", http.StatusGatewayTimeout)
+		case <-time.After(s.BackendTimeout):
+			hasTimedOut = true
+			http.Error(w, "httpbridge backend timeout", http.StatusGatewayTimeout)
+			s.Log.Warnf("backend timeout: %v:%v", channel, stream)
+			break
+		}
+	}
+
+	if !hasTimedOut {
+		return
+	}
+
+	// Drain the response channel
+	for {
+		select {
+		case frame := <-responseChan:
+			if (frame.Flags() & TxFrameFlagsFinal) != 0 {
+				s.Log.Warnf("timed-out response is finished: %v:%v", channel, stream)
 				return
 			}
 		}
 	}
-
-	//http.Error(w, "Message dispatched", http.StatusOK)
 }
 
+// If this is a Header frame, returns the number of remaining bytes that the backend still needs to send us.
+// If not a Header frame, returns the number of body bytes inside this frame.
 func (s *Server) sendResponseFrame(w http.ResponseWriter, req *http.Request, backend *backendConnection, channel, stream uint64, frame *TxFrame) int64 {
 	remaining_bytes := int64(0)
 	body := frame.BodyBytes()
@@ -337,7 +350,7 @@ func (s *Server) sendResponseFrame(w http.ResponseWriter, req *http.Request, bac
 			w.Header().Set(keyStr, valStr)
 			if keyStr == "Content-Length" {
 				remaining_bytes, _ = strconv.ParseInt(valStr, 10, 64)
-				remaining_bytes -= int64(len(body))
+				remaining_bytes -= int64(len(body)) // We're going to send this body data now, so subtract it from the remaining amount
 			}
 		}
 		s.Log.Debugf("Writing status (%v)", statusCode)

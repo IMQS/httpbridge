@@ -53,9 +53,18 @@ public:
 		else
 			lr = Requests.at(RequestKey{ inframe.Request->Channel, inframe.Request->Stream });
 
-		if (prefix_match("/control"))	HttpControl(inframe, lr);
+		if (prefix_match("/control"))
+		{
+			HttpControl(inframe, lr);
+		}
 		else if (prefix_match("/ping"))
 		{
+			Backend->Send(inframe.Request, hb::Status200_OK);
+		}
+		else if (prefix_match("/timeout"))
+		{
+			// Go server sets it's timeout to 50 milliseconds, so 100 is plenty
+			hb::SleepNano(100 * 1000 * 1000);
 			Backend->Send(inframe.Request, hb::Status200_OK);
 		}
 		else if (prefix_match("/stop"))
@@ -184,7 +193,7 @@ private:
 					// split response over two frames
 					hb::Response r1(req);
 					int half = (int) req->BodyBuffer.Count / 2;
-					r1.WriteHeader_ContentLength(req->BodyBuffer.Count);
+					r1.AddHeader_ContentLength(req->BodyBuffer.Count);
 					r1.SetBodyPart(req->BodyBuffer.Data, half);
 					r1.Send();
 					hb::SleepNano(50 * 1000);

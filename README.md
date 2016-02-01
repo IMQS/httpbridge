@@ -60,6 +60,11 @@ Build the unit-test project using tundra, and run the executable.
 * From the "go" directory, run env(.bat/sh)
 * go test httpbridge
 
+To get line coverage:
+
+* go test httpbridge -coverprofile=coverage.out
+* go tool cover -html=coverage.out
+
 The Go test suite automatically compiles the C++ backend tester (using CL or GCC), and launches it.
 
 If you need to debug the C++ code, that is normally launched by the Go test suite, then you can launch the C++ server

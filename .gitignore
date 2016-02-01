@@ -7,5 +7,7 @@ example-backend
 example-backend.exe
 http-bridge.obj
 vs2013
+go/coverage.out
 go/src/httpbridge/test-backend
 go/src/httpbridge/test-backend.exe
+

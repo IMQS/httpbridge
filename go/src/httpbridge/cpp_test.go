@@ -261,6 +261,17 @@ func TestEcho(t *testing.T) {
 	})
 }
 
+func TestTimeout(t *testing.T) {
+	restart(t)
+	oldTimeout := front_server.BackendTimeout
+	defer func() {
+		front_server.BackendTimeout = oldTimeout
+	}()
+	// cpp server sleeps for 100 ms
+	front_server.BackendTimeout = 50 * time.Millisecond
+	testGet(t, "/timeout", 504, "httpbridge backend timeout\n") // I don't understand why the Go HTTP server infrastructure is adding this \n
+}
+
 func TestThreadedBackend(t *testing.T) {
 	restart(t)
 	nthreads := 8

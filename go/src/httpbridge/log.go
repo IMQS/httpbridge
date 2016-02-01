@@ -3,6 +3,7 @@ package httpbridge
 import (
 	"fmt"
 	"io"
+	"time"
 )
 
 type LogLevel int
@@ -14,6 +15,10 @@ const (
 	LogLevelError
 	LogLevelFatal
 )
+
+// ISO 8601, with 6 digits of time precision
+const timeFormat = "2006-01-02T15:04:05.000000Z0700"
+const lineTerminator = "\n"
 
 type Logger struct {
 	Target io.Writer
@@ -62,10 +67,12 @@ func (g *Logger) Fatalf(m string, args ...interface{}) {
 
 func (g *Logger) write(level LogLevel, m string) {
 	if level >= g.Level {
-		g.Target.Write([]byte(m))
+		terminator := ""
 		if len(m) == 0 || m[len(m)-1] != '\n' {
-			g.Target.Write([]byte("\n"))
+			terminator = lineTerminator
 		}
+		msg := time.Now().Format(timeFormat) + " " + m + terminator
+		g.Target.Write([]byte(msg))
 	}
 	if level == LogLevelFatal {
 		panic(m)
