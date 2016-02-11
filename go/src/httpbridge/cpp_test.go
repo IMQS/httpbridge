@@ -42,9 +42,11 @@ func build_cpp() error {
 	//fmt.Printf("pwd = %v\n", cwd)
 	cmd := exec.Command(cpp_test_build[0], cpp_test_build[1:]...)
 	cmdOut := &bytes.Buffer{}
+	cmdErr := &bytes.Buffer{}
 	cmd.Stdout = cmdOut
+	cmd.Stderr = cmdErr
 	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("Build of test-backend failed: %v\n%v", err, string(cmdOut.Bytes()))
+		return fmt.Errorf("Build of test-backend failed: %v\n%v\n%v", err, string(cmdOut.Bytes()), string(cmdErr.Bytes()))
 	}
 	return nil
 }
