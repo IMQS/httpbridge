@@ -23,6 +23,12 @@ class Server;
 
 /* A minimal HTTP/1.1 server.
 
+This server is designed to be used by unit tests of HTTP services that run behind httpbridge.
+By incorporating a mini HTTP server into your application, you can make your C++ application
+self-contained, as least as far as testing many aspects of your HTTP/1.1 compatible interface
+is concerned. If you need to test HTTP 2 features, then you'll need to run those tests against
+a "real" HTTP front-end server, such as the Go server that is part of httpbridge.
+
 Usage
 
 	* Start a backend server.
@@ -68,7 +74,7 @@ public:
 	};
 
 	// This limit is inherent to the size of FD_SETSIZE on Windows. I don't know if other OSes have the same limit,
-	// but if you want a real HTTP server, you've come to the wrong place. The total we can select on is 64, but
+	// but if you want a real HTTP server, you've come to the wrong place. The total we can select() on is 64, but
 	// but we also need two slots to see if we have a new channel that can be accept()'ed (one for HTTP and one for Backend).
 	static const int MaxChannels = 62;
 

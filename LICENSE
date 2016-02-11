@@ -23,3 +23,8 @@ OTHER DEALINGS IN THE SOFTWARE.
 
 For more information, please refer to <http://unlicense.org>
 
+---
+
+This software makes use of the siphash implementation by
+Marek Majkowski, licensed under the MIT License.
+https://github.com/majek/csiphash/

@@ -58,6 +58,7 @@ Build the unit-test project using tundra, and run the executable.
 
 ### Running the Go tests
 * From the "go" directory, run env(.bat/sh)
+* Ensure that your compiler is on the PATH (on Windows, this usually means running `vcvarsall.bat amd64`)
 * go test httpbridge
 
 To get line coverage:

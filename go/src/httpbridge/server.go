@@ -124,6 +124,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 
 	hasBody := req.Body != nil && req.ContentLength != 0
 
+	if s.Log.Level <= LogLevelDebug {
+		s.Log.Debugf("Request %v:%v started (%v)", channel, stream, req.URL.String())
+	}
+
 	if !s.sendHeaderFrame(w, req, backend, channel, stream, hasBody) {
 		return
 	}

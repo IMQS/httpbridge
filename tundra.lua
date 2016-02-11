@@ -5,6 +5,7 @@ Build {
 			Sources = {
 				"cpp/example-backend.cpp",
 				"cpp/http-bridge.cpp",
+				"cpp/http-bridge.h",
 			},
 			Includes = {
 				"cpp/flatbuffers/include",
@@ -20,6 +21,7 @@ Build {
 			Sources = {
 				"cpp/test-backend.cpp",
 				"cpp/http-bridge.cpp",
+				"cpp/http-bridge.h",
 			},
 			Includes = {
 				"cpp/flatbuffers/include",
@@ -35,6 +37,7 @@ Build {
 			Sources = {
 				"cpp/unit-test.cpp",
 				"cpp/http-bridge.cpp",
+				"cpp/http-bridge.h",
 			},
 			Includes = {
 				"cpp/flatbuffers/include",
@@ -55,6 +58,7 @@ Build {
 				"cpp/server/http11/http11_parser.c",
 				"cpp/server/http11/http11_parser.h",
 				"cpp/http-bridge.cpp",
+				"cpp/http-bridge.h",
 			},
 			Includes = {
 				"cpp/flatbuffers/include",

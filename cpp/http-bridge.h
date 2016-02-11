@@ -35,6 +35,7 @@ c:\dev\head\otaku\t2-output\win64-2013-debug-default\flatc -g -o go/src -b http-
 #include <atomic>
 #include <mutex>
 #include <thread>
+#include <memory>
 
 namespace flatbuffers
 {
@@ -86,6 +87,9 @@ HTTPBRIDGE_API HTTPBRIDGE_NORETURN_PREFIX void BuiltinTrap() HTTPBRIDGE_NORETURN
 	class Response;
 	class InFrame;
 	class HeaderCacheRecv;		// Implemented in http-bridge.cpp
+
+	typedef std::shared_ptr<Request>		RequestPtr;
+	typedef std::shared_ptr<const Request>	ConstRequestPtr;
 
 	enum SendResult
 	{
@@ -181,7 +185,8 @@ HTTPBRIDGE_API HTTPBRIDGE_NORETURN_PREFIX void BuiltinTrap() HTTPBRIDGE_NORETURN
 	HTTPBRIDGE_API void			Shutdown();								// Must be called after all use of httpbridge
 	HTTPBRIDGE_API const char*	VersionString(HttpVersion version);		// Returns HTTP/1.0 HTTP/1.1 HTTP/2.0
 	HTTPBRIDGE_API const char*	StatusString(StatusCode status);		// "OK", "Not Found", etc
-	HTTPBRIDGE_API size_t		Hash16B(uint64_t pair[2]);				// Hash 16 bytes
+	HTTPBRIDGE_API uint64_t		siphash24(const void *src, unsigned long src_sz, const char key[16]); // Implementation of siphash-2-4
+	HTTPBRIDGE_API size_t		Hash16B(uint64_t pair[2]);				// Hash 16 bytes with a decent (but not cryptographic) hash function.
 	HTTPBRIDGE_API void			SleepNano(int64_t nanoseconds);
 	HTTPBRIDGE_API void*		Alloc(size_t size, Logger* logger, bool panicOnFail = true);
 	HTTPBRIDGE_API void*		Realloc(void* buf, size_t size, Logger* logger, bool panicOnFail = true);
@@ -228,7 +233,26 @@ HTTPBRIDGE_API HTTPBRIDGE_NORETURN_PREFIX void BuiltinTrap() HTTPBRIDGE_NORETURN
 		typedef int32_t INT;
 
 		Vector() {}
-		~Vector() { for (INT i = 0; i < Count; i++) Items[i].T::~T(); free(Items); }
+		~Vector()
+		{
+			Clear();
+		}
+
+		// Throw away all memory (ie do not free), and reset all members to zero
+		void Discard()
+		{
+			memset(this, 0, sizeof(*this));
+		}
+
+		void Clear()
+		{
+			for (INT i = 0; i < Count; i++)
+				Items[i].T::~T();
+			free(Items);
+			Capacity = 0;
+			Count = 0;
+			Items = nullptr;
+		}
 
 		void Push(const T& v)
 		{
@@ -323,7 +347,7 @@ HTTPBRIDGE_API HTTPBRIDGE_NORETURN_PREFIX void BuiltinTrap() HTTPBRIDGE_NORETURN
 	inline bool operator==(const char* a, const ConstString& b)				{ return b == a; }
 	inline bool operator!=(const char* a, const ConstString& b)				{ return b != a; }
 
-	inline bool operator==(const ConstString& a, const std::string& b)		{ return (a.CStr() == nullptr && b.size() == 0) || (a.CStr() != nullptr && b.size() != 0 && strcmp(a.CStr(), b.c_str()) == 0); }
+	inline bool operator==(const ConstString& a, const std::string& b)		{ return ((a.CStr() == nullptr || a[0] == 0) && b.size() == 0) || (a.CStr() != nullptr && b.size() != 0 && strcmp(a.CStr(), b.c_str()) == 0); }
 	inline bool operator!=(const ConstString& a, const std::string& b)		{ return !(a == b); }
 
 	inline bool operator==(const std::string& a, const ConstString& b)		{ return b == a; }
@@ -419,16 +443,15 @@ namespace hb
 		std::atomic<size_t>	InitialBufferSize;
 
 							Backend();
-							~Backend();											// This calls Close()
+							~Backend();																// Destructor calls Close()
 		bool				Connect(const char* network, const char* addr);
 		bool				IsConnected();
 		void				Close();
 		SendResult			Send(Response& response);
-		SendResult			Send(const Request* request, StatusCode status);					// Convenience method for sending a simple response
-		size_t				SendBodyPart(const Request* request, const void* body, size_t len);	// Stream out the body of a response. Returns the number of bytes sent.
-		bool				Recv(InFrame& frame);												// Returns true if a frame was received
-		bool				ResendWhenBodyIsDone(InFrame& frame);								// Called by InFrame.ResendWhenBodyIsDone(). Returns false if out of memory.
-		void				RequestDestroyed(const StreamKey& key);								// Intended to be called ONLY by Request's destructor. Do not call this if you're not "Request".
+		SendResult			Send(ConstRequestPtr request, StatusCode status);						// Convenience method for sending a simple response
+		SendResult			SendBodyPart(ConstRequestPtr request, const void* body, size_t len);	// Stream out the body of a response.
+		bool				Recv(InFrame& frame);													// Returns true if a frame was received
+		bool				ResendWhenBodyIsDone(InFrame& frame);									// Called by InFrame.ResendWhenBodyIsDone(). Returns false if out of memory.
 		Logger*				AnyLog();
 
 	private:
@@ -442,37 +465,37 @@ namespace hb
 		static const uint64_t ResponseBodyUninitialized = -1;
 		struct RequestState
 		{
-			hb::Request*	Request;
-			uint64_t		ResponseBodyRemaining;
-			bool			IsResponseHeaderSent;
+			RequestPtr	Request;
+			uint64_t	ResponseBodyRemaining;
+			bool		IsResponseHeaderSent;
 		};
 		typedef std::unordered_map<StreamKey, RequestState> StreamToRequestMap;
 
-		// GiantLock guards all data structures that are mutable by our various entry points.
-		std::mutex			GiantLock;
-		
-		// TransmitLock guards sending data out over Transport
-		std::mutex			TransmitLock;
-
 		hb::HeaderCacheRecv* HeaderCacheRecv = nullptr;
-		ITransport*			Transport = nullptr;
 		Logger				NullLog;
 		hb::Buffer			RecvBuf;
 		std::thread::id		ThreadId;
+
+		std::mutex			TransportLock;					// Guards sending data out over Transport
+		ITransport*			Transport = nullptr;
+
+		std::mutex			CurrentRequestLock;				// Guards access to the map, as well as the RequestState objects stored inside the map
 		StreamToRequestMap	CurrentRequests;
+
 		std::atomic<size_t>	BufferedRequestsTotalBytes;		// Total number of body bytes allocated for "BufferedRequests"
 
 		RecvResult			RecvInternal(InFrame& inframe);
+		void				RequestFinished(const StreamKey& key);
 		bool				Connect(ITransport* transport, const char* addr);
 		FrameStatus			UnpackHeader(const httpbridge::TxFrame* txframe, InFrame& inframe);
 		FrameStatus			UnpackBody(const httpbridge::TxFrame* txframe, InFrame& inframe);
 		size_t				TotalHeaderBlockSize(const httpbridge::TxFrame* frame);
 		void				LogAndPanic(const char* msg);
-		void				SendResponse(Request& request, StatusCode status);
+		void				SendResponse(RequestPtr request, StatusCode status);
 		void				SendResponse(uint64_t channel, uint64_t stream, StatusCode status);
 		RequestState*		GetRequestOrDie(uint64_t channel, uint64_t stream);
 		static StreamKey	MakeStreamKey(uint64_t channel, uint64_t stream);
-		static StreamKey	MakeStreamKey(const Request& request);
+		static StreamKey	MakeStreamKey(ConstRequestPtr request);
 	};
 
 	/* HTTP request
@@ -480,15 +503,13 @@ namespace hb
 	to contain arbitrary binary data, so you may be missing something by not using the header accessor functions
 	that allow you to read through null characters, but that's your choice.
 
-	The lifetime of a Request object is determined by a liveness count. The liveness count starts out at 2.
-	Liveness is decremented as follows:
-		* When the InFrame marked as IsLast is destroyed, liveness is decremented by one.
-		* When the OutFrame marked as IsLast is sent, liveness is decremented by one.
-		* When the InFrame marked as IsAborted is destroyed, liveness is decremented by two (because aborted streams never get a response).
-	If liveness drops to zero, the request object is destroyed, and it is removed from Backend's table of current requests.
+	A Request object is typically used as a shared_ptr, because the lifetime of requests varies greatly,
+	and other solutions are tricky to get right. When implementing httpbridge services, you must always
+	use RequestPtr or ConstRequestPtr (aka shared_ptr<Request> and shared_ptr<const Request>) when storing
+	a Request object. Shared_ptr's reference counting only works if there is an unbroken chain of shared_ptr
+	objects from start to finish. If you use a Request* object somewhere along the line, then the chain is
+	broken. So just stick to using RequestPtr or ConstRequestPtr everywhere, and things will just work.
 
-	NOTE: An default-initialized Request object must be memcpy-able. We need to use memcpy because
-	std::atomic<int> (_Liveness) prevents the compiler from generating an operator= for the Request class.
 	*/
 	class HTTPBRIDGE_API Request
 	{
@@ -527,12 +548,6 @@ namespace hb
 		// This is called automatically by Backend. Returns false if an element is too long
 		bool					ParseURI();
 
-		// Returns true if the Request object was destroyed
-		bool					DecrementLiveness();
-
-		// Free any memory that we own, and then initialize to a newly-constructed Request
-		void					Reset();
-
 		ConstString				Method() const;		// Returns the method, such as GET or POST
 		ConstString				URI() const;		// Returns the raw URI of the request
 
@@ -543,7 +558,7 @@ namespace hb
 
 		// Use NextQuery to iterate over the query parameters.
 		// Returns zero if there are no more items.
-		// Example: for (auto iter = req->NextQuery(0); iter != 0; iter = req->NextQuery(iter)) {...}
+		// Example: for (auto iter = req->NextQuery(0, qkey, qval); iter != 0; iter = req->NextQuery(iter, qkey, qval)) {...}
 		int32_t					NextQuery(int32_t iterator, const char*& key, const char*& value) const;
 
 		// Returns the number of headers
@@ -574,17 +589,14 @@ namespace hb
 		static const uint16_t	EndOfQueryMarker = 65535;
 		int32_t					_HeaderCount = 0;
 		const uint8_t*			_HeaderBlock = nullptr;		// First HeaderLine[] array and then the headers themselves
-		std::atomic<int>		_Liveness;					// A reference count on Request.
 		char*					_CachedURI = nullptr;
-
-		void					Free();
 	};
 
 	// A frame received from the client
 	class HTTPBRIDGE_API InFrame
 	{
 	public:
-		hb::Request*	Request;
+		RequestPtr		Request;
 		bool			IsHeader;			// Is this the first frame of the request? Note that IsHeader and IsLast are both true for a request with an empty body.
 		bool			IsLast;				// Is this the last frame of the request? If true, then the request is deleted by the frame's destructor.
 		bool			IsAborted;			// True if the stream has been aborted (ie the browser connection timed out, etc). Such a frame contains no data, and IsLast is guaranteed to be false.
@@ -606,9 +618,19 @@ namespace hb
 		InFrame& operator= (const InFrame&) = delete;
 	};
 
-	/* HTTP Response
-	If you don't set a ContentLength header, then Backend implicitly adds a Content-Length header equal to the size
-	of the body data inside the response object. If that size is zero, then no implicit header is added.
+	/* HTTP Response (or part of a response)
+
+	If you don't set a Content-Length header, then Backend implicitly adds a Content-Length header equal to the size
+	of the body data inside the Response object. If that size is zero, then no implicit header is added.
+
+	If you want to stream your response out, then you must call AddHeader_ContentLength (which is just a convenience method
+	which does AddHeader("Content-Length", ...)). If you don't do that, then httpbridge will assume that the body
+	of your response consists solely of what is present in the first response frame.
+
+	A Response is either one of these two things:
+	1. A Header response, which must be the first response frame sent on a stream. A header response can optionally contain part, or all, of the response body.
+	2. A BodyPart response, which may not contain any headers, and is strictly just a chunk of bytes that
+		forms the next part of the body being transmitted.
 	*/
 	class HTTPBRIDGE_API Response
 	{
@@ -622,17 +644,24 @@ namespace hb
 		StatusCode			Status = Status200_OK;
 
 		Response();
-		Response(const Request* request, StatusCode status = Status200_OK);
+		Response(ConstRequestPtr request, StatusCode status = Status200_OK);
+		Response(hb::Backend* backend, HttpVersion version, uint64_t channel, uint64_t stream, StatusCode status = Status200_OK);
+		Response(Response&& b);
+
+		Response& operator=(Response&& b);
+
+		// Return a Response object that contains a portion of the response body
+		static Response MakeBodyPart(ConstRequestPtr request, const void* part, size_t len);
+
 		~Response();
 
 		bool			IsOK() const																		{ return Status == Status200_OK; }
-		void			SetStatus(StatusCode status)														{ Status = status; }
-		void			SetStatusAndBody(StatusCode status, const char* body);								// Sets the status and the body. Typically used for small error messages.
+		void			SetStatus(StatusCode status);
+		void			SetStatusAndBody(StatusCode status, const char* body);								// Sets the status and the body.
 		void			AddHeader(const char* key, const char* value);										// Add a header
 		void			AddHeader(int32_t keyLen, const char* key, int32_t valLen, const char* value);		// Add a header
-		void			AddHeader_ContentLength(uint64_t contentLength);									// Add a Content-Length header
-		void			SetBody(const void* body, size_t len);												// Set the entire body. Panics if called more than once.
-		void			SetBodyPart(const void* part, size_t len);											// Set part of the body. Sets Status to StatusMeta_BodyPart
+		void			AddHeader_ContentLength(uint64_t contentLength);									// Convenience method to add a Content-Length header
+		void			SetBody(const void* body, size_t len);												// Set body. Panics if called more than once.
 		SendResult		Send();																				// Call Backend->Send(this)
 
 		int32_t			HeaderCount() const { return HeaderIndex.Size() / 2; }
@@ -666,21 +695,23 @@ namespace hb
 		Vector<uint32_t>					HeaderIndex;
 		Vector<char>						HeaderBuf;
 
+		void	Free();
 		void	CreateBuilder();
 		int32_t	HeaderKeyLen(int32_t i) const;
 		int32_t	HeaderValueLen(int32_t i) const;
+		void	SetBodyInternal(const void* body, size_t len);
 	};
 }
 
-namespace std
-{
-	inline void swap(hb::Request& a, hb::Request& b)
-	{
-		hb::Request tmp;
-		memcpy(&tmp, &a, sizeof(tmp));
-		memcpy(&a, &b, sizeof(tmp));
-		memcpy(&b, &tmp, sizeof(tmp));
-		memset(&tmp, 0, sizeof(tmp));
-	}
-}
+//namespace std
+//{
+//	inline void swap(hb::Request& a, hb::Request& b)
+//	{
+//		hb::Request tmp;
+//		memcpy(&tmp, &a, sizeof(tmp));
+//		memcpy(&a, &b, sizeof(tmp));
+//		memcpy(&b, &tmp, sizeof(tmp));
+//		memset(&tmp, 0, sizeof(tmp));
+//	}
+//}
 #endif

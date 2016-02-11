@@ -3,6 +3,7 @@
 #include <string>
 #include <string.h>
 #include <stdio.h>
+#include <stdint.h>
 
 #ifdef HTTPBRIDGE_PLATFORM_WINDOWS
 #include <Ws2tcpip.h>
@@ -151,24 +152,103 @@ namespace hb
 		return "Unrecognized HTTP Status Code";
 	}
 
+
+	// siphash implementation:
+	// <MIT License>
+	// Copyright (c) 2013  Marek Majkowski <marek@popcount.org>
+	// https://github.com/majek/csiphash/
+
+#if defined(__BYTE_ORDER__) && defined(__ORDER_LITTLE_ENDIAN__) && \
+	__BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+#  define _le64toh(x) ((uint64_t)(x))
+#elif defined(_WIN32)
+	/* Windows is always little endian, unless you're on xbox360
+	http://msdn.microsoft.com/en-us/library/b0084kay(v=vs.80).aspx */
+#  define _le64toh(x) ((uint64_t)(x))
+#elif defined(__APPLE__)
+#  include <libkern/OSByteOrder.h>
+#  define _le64toh(x) OSSwapLittleToHostInt64(x)
+#else
+
+	/* See: http://sourceforge.net/p/predef/wiki/Endianness/ */
+#  if defined(__FreeBSD__) || defined(__NetBSD__) || defined(__OpenBSD__)
+#    include <sys/endian.h>
+#  else
+#    include <endian.h>
+#  endif
+#  if defined(__BYTE_ORDER) && defined(__LITTLE_ENDIAN) && \
+	__BYTE_ORDER == __LITTLE_ENDIAN
+#    define _le64toh(x) ((uint64_t)(x))
+#  else
+#    define _le64toh(x) le64toh(x)
+#  endif
+
+#endif
+
+
+#define ROTATE(x, b) (uint64_t)( ((x) << (b)) | ( (x) >> (64 - (b))) )
+
+#define HALF_ROUND(a,b,c,d,s,t)			\
+	a += b; c += d;				\
+	b = ROTATE(b, s) ^ a;			\
+	d = ROTATE(d, t) ^ c;			\
+	a = ROTATE(a, 32);
+
+#define DOUBLE_ROUND(v0,v1,v2,v3)		\
+	HALF_ROUND(v0,v1,v2,v3,13,16);		\
+	HALF_ROUND(v2,v1,v0,v3,17,21);		\
+	HALF_ROUND(v0,v1,v2,v3,13,16);		\
+	HALF_ROUND(v2,v1,v0,v3,17,21);
+
+	HTTPBRIDGE_API uint64_t siphash24(const void *src, unsigned long src_sz, const char key[16]) {
+		const uint64_t *_key = (uint64_t *) key;
+		uint64_t k0 = _le64toh(_key[0]);
+		uint64_t k1 = _le64toh(_key[1]);
+		uint64_t b = (uint64_t) src_sz << 56;
+		const uint64_t *in = (uint64_t*) src;
+
+		uint64_t v0 = k0 ^ 0x736f6d6570736575ULL;
+		uint64_t v1 = k1 ^ 0x646f72616e646f6dULL;
+		uint64_t v2 = k0 ^ 0x6c7967656e657261ULL;
+		uint64_t v3 = k1 ^ 0x7465646279746573ULL;
+
+		while (src_sz >= 8) {
+			uint64_t mi = _le64toh(*in);
+			in += 1; src_sz -= 8;
+			v3 ^= mi;
+			DOUBLE_ROUND(v0, v1, v2, v3);
+			v0 ^= mi;
+		}
+
+		uint64_t t = 0; uint8_t *pt = (uint8_t *) &t; uint8_t *m = (uint8_t *) in;
+		switch (src_sz) {
+		case 7: pt[6] = m[6];
+		case 6: pt[5] = m[5];
+		case 5: pt[4] = m[4];
+		case 4: *((uint32_t*) &pt[0]) = *((uint32_t*) &m[0]); break;
+		case 3: pt[2] = m[2];
+		case 2: pt[1] = m[1];
+		case 1: pt[0] = m[0];
+		}
+		b |= _le64toh(t);
+
+		v3 ^= b;
+		DOUBLE_ROUND(v0, v1, v2, v3);
+		v0 ^= b; v2 ^= 0xff;
+		DOUBLE_ROUND(v0, v1, v2, v3);
+		DOUBLE_ROUND(v0, v1, v2, v3);
+		return (v0 ^ v1) ^ (v2 ^ v3);
+	}
+
 	size_t Hash16B(uint64_t pair[2])
 	{
-		// This is the final mixing step of xxhash64
-		uint64_t PRIME64_2 = 14029467366897019727ULL;
-		uint64_t PRIME64_3 = 1609587929392839161ULL;
-		uint64_t a = pair[0];
-		a ^= a >> 33;
-		a *= PRIME64_2;
-		a ^= a >> 29;
-		a *= PRIME64_3;
-		a ^= a >> 32;
-		uint64_t b = pair[1];
-		b ^= b >> 33;
-		b *= PRIME64_2;
-		b ^= b >> 29;
-		b *= PRIME64_3;
-		b ^= b >> 32;
-		return (size_t) (a ^ b);
+		// Initially, I wanted to use the final mixing step of xxhash64 here. That is pretty fast (4 multiplies, 6 shifts, and 6 xors).
+		// However, it eventually occurred to me that the stream number is controllable by the client, and that's what we're ostensibly
+		// hashing here (the channel and the stream). I don't know enough about this stuff to be able to figure out whether the final
+		// mixing step of xxhash64 is susceptible to the kind of attacks that siphash was built for, but in the absence of that
+		// knowledge, I'm doing the conservative thing.
+		const uint64_t key[2] = { 0, 0 };
+		return (size_t) siphash24(pair, sizeof(pair[0]) * 2, (const char*) key);
 	}
 
 	// Returns the length of the string, excluding the null terminator
@@ -810,12 +890,12 @@ namespace hb
 
 			if (IsAborted)
 			{
-				Request->DecrementLiveness();
-				Request->DecrementLiveness();
+				//Request->DecrementLiveness();
+				//Request->DecrementLiveness();
 			}
 			else if (IsLast)
 			{
-				Request->DecrementLiveness();
+				//Request->DecrementLiveness();
 			}
 			// Note that Request can have destroyed itself by this point, so NULL is the only legal value for it now
 			Request = nullptr;
@@ -833,8 +913,8 @@ namespace hb
 	{
 		if (Request != nullptr)
 		{
-			Request->DecrementLiveness();
-			Request->DecrementLiveness();
+			//Request->DecrementLiveness();
+			//Request->DecrementLiveness();
 		}
 		Request = nullptr;
 		Reset();
@@ -891,14 +971,15 @@ namespace hb
 	void Backend::Close()
 	{
 		// Pull items out of CurrentRequests hash map, because we can't iterate over them while deleting them
-		std::vector<Request*> waiting;
-		for (auto& item : CurrentRequests)
-			waiting.push_back(item.second.Request);
-
-		for (auto item : waiting)
-		{
-			while (!item->DecrementLiveness()) {}
-		}
+		//std::vector<Request*> waiting;
+		//for (auto& item : CurrentRequests)
+		//	waiting.push_back(item.second.Request);
+		//
+		//for (auto item : waiting)
+		//{
+		//	while (!item->DecrementLiveness()) {}
+		//}
+		CurrentRequests.clear();
 
 		HTTPBRIDGE_ASSERT(BufferedRequestsTotalBytes == 0);
 
@@ -925,15 +1006,18 @@ namespace hb
 
 	SendResult Backend::Send(Response& response)
 	{
-		GiantLock.lock();
+		CurrentRequestLock.lock();
 		// TODO: rate limiting. How? Before attempting to send this frame, we return SendResult_BufferFull,
 		// then we wait for the server to tell us that we are clear to send again. This does imply
 		// that the server would also need to tell us when we are not clear to send.
 		RequestState* rs = GetRequestOrDie(response.Channel, response.Stream);
 		bool isResponseHeader = response.Status != StatusMeta_BodyPart;
-		HTTPBRIDGE_ASSERT(isResponseHeader == !rs->IsResponseHeaderSent);
+
 		if (!isResponseHeader)
 			HTTPBRIDGE_ASSERT(response.HeaderCount() == 0);
+
+		// The first response must contain a response header
+		HTTPBRIDGE_ASSERT(isResponseHeader == !rs->IsResponseHeaderSent);
 
 		if (isResponseHeader)
 		{
@@ -950,15 +1034,16 @@ namespace hb
 				if (response.BodyBytes() != 0)
 					response.AddHeader_ContentLength(response.BodyBytes());
 			}
+			rs->IsResponseHeaderSent = true;
 		}
 		HTTPBRIDGE_ASSERT(rs->ResponseBodyRemaining >= response.BodyBytes()); // You have sent more data than Content-Length
 		rs->ResponseBodyRemaining -= response.BodyBytes();
-		GiantLock.unlock();
+		CurrentRequestLock.unlock();
 
 		bool isLast = rs->ResponseBodyRemaining == 0;
 		if (isLast)
 		{
-			rs->Request->DecrementLiveness(); // this takes the GiantLock
+			RequestFinished(MakeStreamKey(rs->Request));
 			rs = nullptr;
 		}
 
@@ -966,7 +1051,7 @@ namespace hb
 		size_t len = 0;
 		void* buf = nullptr;
 		response.FinishFlatbuffer(buf, len, isLast);
-		TransmitLock.lock();
+		TransportLock.lock();
 		while (offset != len)
 		{
 			size_t sent = 0;
@@ -974,24 +1059,25 @@ namespace hb
 			offset += sent;
 			if (res == SendResult_Closed)
 			{
-				TransmitLock.unlock();
+				TransportLock.unlock();
 				return res;
 			}
 		}
-		TransmitLock.unlock();
+		TransportLock.unlock();
 		return SendResult_All;
 	}
 
-	SendResult Backend::Send(const Request* request, StatusCode status)
+	SendResult Backend::Send(ConstRequestPtr request, StatusCode status)
 	{
 		Response response(request, status);
 		return Send(response);
 	}
 
-	size_t Backend::SendBodyPart(const Request* request, const void* body, size_t len)
+	SendResult Backend::SendBodyPart(ConstRequestPtr request, const void* body, size_t len)
 	{
-		Response response(request, StatusMeta_BodyPart);
+		Response response(request, Status200_OK);
 		response.SetBody(body, len);
+		response.Status = StatusMeta_BodyPart;
 		return Send(response);
 	}
 
@@ -1012,7 +1098,7 @@ namespace hb
 		if (res != RecvResult_Data)
 			return false;
 
-		StreamKey streamKey = MakeStreamKey(*frame.Request);
+		StreamKey streamKey = MakeStreamKey(frame.Request);
 
 		if (frame.IsHeader)
 		{
@@ -1020,9 +1106,9 @@ namespace hb
 			rs.Request = frame.Request;
 			rs.ResponseBodyRemaining = ResponseBodyUninitialized;
 			rs.IsResponseHeaderSent = false;
-			GiantLock.lock();
+			CurrentRequestLock.lock();
 			CurrentRequests[streamKey] = rs;
-			GiantLock.unlock();
+			CurrentRequestLock.unlock();
 
 			if (frame.Request->BodyLength == 0)
 			{
@@ -1052,16 +1138,16 @@ namespace hb
 
 	bool Backend::ResendWhenBodyIsDone(InFrame& frame)
 	{
-		Request* request = frame.Request;
+		RequestPtr request = frame.Request;
 
 		if (!frame.IsHeader || frame.IsLast || request->BodyLength == 0)
 			LogAndPanic("ResendWhenBodyIsDone may only be called on the first frame of a request (the header frame), with a non-zero body length");
 
-		GiantLock.lock();
-		StreamKey key = MakeStreamKey(*request);
+		CurrentRequestLock.lock();
+		StreamKey key = MakeStreamKey(request);
 		if (CurrentRequests.find(key) == CurrentRequests.end())
 			LogAndPanic("ResendWhenBodyIsDone called on an unknown request");
-		GiantLock.unlock();
+		CurrentRequestLock.unlock();
 
 		size_t initialSize = min(InitialBufferSize.load(), (size_t) request->BodyLength);
 		initialSize = max(initialSize, frame.BodyBytesLen);
@@ -1070,7 +1156,7 @@ namespace hb
 		if (initialSize + (uint64_t) BufferedRequestsTotalBytes > (uint64_t) MaxWaitingBufferTotal)
 		{
 			AnyLog()->Log("MaxWaitingBufferTotal exceeded");
-			SendResponse(*request, Status503_Service_Unavailable);
+			SendResponse(request, Status503_Service_Unavailable);
 			return false;
 		}
 
@@ -1078,7 +1164,7 @@ namespace hb
 		if (request->BodyBuffer.Data == nullptr)
 		{
 			AnyLog()->Log("Alloc for request buffer failed");
-			SendResponse(*request, Status503_Service_Unavailable);
+			SendResponse(request, Status503_Service_Unavailable);
 			return false;
 		}
 
@@ -1094,12 +1180,12 @@ namespace hb
 		return true;
 	}
 
-	void Backend::RequestDestroyed(const StreamKey& key)
+	void Backend::RequestFinished(const StreamKey& key)
 	{
-		GiantLock.lock();
+		CurrentRequestLock.lock();
 		auto cr = CurrentRequests.find(key);
 		HTTPBRIDGE_ASSERT(cr != CurrentRequests.end());
-		Request* request = cr->second.Request;
+		ConstRequestPtr request = cr->second.Request;
 
 		if (request->IsBuffered)
 		{
@@ -1108,8 +1194,9 @@ namespace hb
 			BufferedRequestsTotalBytes -= (size_t) request->BodyBuffer.Capacity;
 		}
 
+		cr->second.Request = nullptr; // ensure that smart_ptr reference is decremented now
 		CurrentRequests.erase(key);
-		GiantLock.unlock();
+		CurrentRequestLock.unlock();
 	}
 
 	// TODO: Experiment with reading exactly one frame at a time. First read 4 bytes for the frame length, and thereafter read only
@@ -1243,7 +1330,7 @@ namespace hb
 		lines[headers->size()].KeyStart = hpos;
 		lines[headers->size()].KeyLen = 0;
 
-		inframe.Request = new hb::Request();
+		inframe.Request.reset(new hb::Request());
 		inframe.Request->Initialize(this, TranslateVersion(txframe->version()), txframe->channel(), txframe->stream(), headers->size(), hblock);
 		return FrameOK;
 	}
@@ -1252,16 +1339,16 @@ namespace hb
 	{
 		if (inframe.Request == nullptr)
 		{
-			GiantLock.lock();
+			CurrentRequestLock.lock();
 			auto cr = CurrentRequests.find(MakeStreamKey(txframe->channel(), txframe->stream()));
 			if (cr == CurrentRequests.end())
 			{
 				AnyLog()->Logf("Received body bytes for unknown stream [%llu:%llu]", txframe->channel(), txframe->stream());
-				GiantLock.unlock();
+				CurrentRequestLock.unlock();
 				return FrameInvalid;
 			}
 			inframe.Request = cr->second.Request;
-			GiantLock.unlock();
+			CurrentRequestLock.unlock();
 		}
 
 		// Empty body frames are a waste, but not an error. Likely to be the final frame.
@@ -1338,19 +1425,19 @@ namespace hb
 		HTTPBRIDGE_PANIC(msg);
 	}
 
-	void Backend::SendResponse(Request& request, StatusCode status)
+	void Backend::SendResponse(RequestPtr request, StatusCode status)
 	{
-		Response response(&request, status);
+		Response response(request, status);
 		Send(response);
 	}
 
 	void Backend::SendResponse(uint64_t channel, uint64_t stream, StatusCode status)
 	{
-		Request tmp;
-		tmp.Backend = this;
-		tmp.Channel = channel;
-		tmp.Stream = stream;
-		Response response(&tmp, status);
+		auto tmp = RequestPtr(new Request);
+		tmp->Backend = this;
+		tmp->Channel = channel;
+		tmp->Stream = stream;
+		Response response(tmp, status);
 		Send(response);
 	}
 
@@ -1366,9 +1453,9 @@ namespace hb
 		return StreamKey{ channel, stream };
 	}
 
-	StreamKey Backend::MakeStreamKey(const Request& request)
+	StreamKey Backend::MakeStreamKey(ConstRequestPtr request)
 	{
-		return StreamKey{ request.Channel, request.Stream };
+		return StreamKey{ request->Channel, request->Stream };
 	}
 
 	//////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -1518,12 +1605,12 @@ namespace hb
 
 	Request::Request()
 	{
-		_Liveness = 2;
 	}
 
 	Request::~Request()
 	{
-		Free();
+		hb::Free(_CachedURI);
+		hb::Free((void*) _HeaderBlock);
 	}
 
 	void Request::Initialize(hb::Backend* backend, HttpVersion version, uint64_t channel, uint64_t stream, int32_t headerCount, const void* headerBlock)
@@ -1537,28 +1624,6 @@ namespace hb
 		const char* contentLength = HeaderByName(Header_Content_Length);
 		if (contentLength != nullptr)
 			BodyLength = (uint64_t) uatoi64(contentLength);
-	}
-
-	bool Request::DecrementLiveness()
-	{
-		_Liveness--;
-		if (_Liveness == 0)
-		{
-			if (Backend != nullptr)
-				Backend->RequestDestroyed(StreamKey{ Channel, Stream });
-			delete this;
-			return true;
-		}
-		return false;
-	}
-
-	void Request::Reset()
-	{
-		Free();
-		// Use memcpy to reset ourselves, because atomic<int> _Liveness prevents the compiler
-		// from generating Reset::operator=
-		Request tmp;
-		memcpy(this, &tmp, sizeof(tmp));
 	}
 
 	ConstString Request::Method() const
@@ -1691,12 +1756,6 @@ namespace hb
 		HeaderAt(index, keyLen, key, valLen, val);
 	}
 
-	void Request::Free()
-	{
-		hb::Free(_CachedURI);
-		hb::Free((void*) _HeaderBlock);
-	}
-
 	// Return false if the decoded length of either the path or any query item exceeds 65534 characters
 	bool Request::ParseURI()
 	{
@@ -1758,7 +1817,10 @@ namespace hb
 
 				*((uint16_t*) out) = valLen;
 				out += 2;
-				p.DecodeVal(val, out, true);
+				if (valLen == 0)
+					*out = 0;
+				else
+					p.DecodeVal(val, out, true);
 				out += RoundUpOdd(valLen) + 1;
 			}
 		}
@@ -1779,23 +1841,67 @@ namespace hb
 	{
 	}
 
-	Response::Response(const Request* request, StatusCode status)
+	Response::Response(ConstRequestPtr request, StatusCode status)
 	{
 		Status = status;
 		Backend = request->Backend;
 		Version = request->Version;
-		Stream = request->Stream;
 		Channel = request->Channel;
+		Stream = request->Stream;
+	}
+
+	Response::Response(hb::Backend* backend, HttpVersion version, uint64_t channel, uint64_t stream, StatusCode status)
+	{
+		Backend = backend;
+		Version = version;
+		Channel = channel;
+		Stream = stream;
+		Status = status;
+	}
+
+	Response::Response(Response&& b)
+	{
+		*this = std::move(b);
+	}
+
+	Response& Response::operator=(Response&& b)
+	{
+		if (this != &b)
+		{
+			Free();
+			memcpy(this, &b, sizeof(*this));
+			memset(&b, 0, sizeof(*this));
+		}
+		return *this;
+	}
+
+	Response Response::MakeBodyPart(ConstRequestPtr request, const void* part, size_t len)
+	{
+		Response r;
+		r.Backend = request->Backend;
+		r.SetBodyInternal(part, len);
+		r.Status = StatusMeta_BodyPart;
+		return r;
 	}
 
 	Response::~Response()
 	{
-		if (FBB != nullptr)
-			delete FBB;
+		Free();
+	}
+
+	void Response::SetStatus(StatusCode status)
+	{
+		// A BodyPart frame may not contain any status. If you want to cancel a stream, then ... TODO
+		HTTPBRIDGE_ASSERT(Status != StatusMeta_BodyPart);
+
+		Status = status;
 	}
 
 	void Response::SetStatusAndBody(StatusCode status, const char* body)
 	{
+		// Body Part is a standalone frame. Use MakeBodyPart() or Backend.SendBodyPart().
+		HTTPBRIDGE_ASSERT(Status != StatusMeta_BodyPart);
+
 		SetStatus(status);
 		SetBody(body, strlen(body));
 	}
@@ -1811,6 +1917,9 @@ namespace hb
 
 	void Response::AddHeader(int32_t keyLen, const char* key, int32_t valLen, const char* value)
 	{
+		// Body part may not contain headers
+		HTTPBRIDGE_ASSERT(Status != StatusMeta_BodyPart);
+
 		// Ensure that our uint32_t casts down below are safe, and also header sanity
 		HTTPBRIDGE_ASSERT(keyLen <= MaxHeaderKeyLen && valLen <= MaxHeaderValueLen);
 		
@@ -1828,15 +1937,20 @@ namespace hb
 
 	void Response::AddHeader_ContentLength(uint64_t contentLength)
 	{
-		// You must first call WriteHeader_ContentLength(), and then call SetBodyPart()
-		HTTPBRIDGE_ASSERT(Status != StatusMeta_BodyPart);
-
 		char buf[21];
 		u64toa(contentLength, buf);
 		AddHeader(Header_Content_Length, buf);
 	}
 
 	void Response::SetBody(const void* body, size_t len)
+	{
+		// Use MakeBodyPart()
+		HTTPBRIDGE_ASSERT(Status != StatusMeta_BodyPart);
+
+		SetBodyInternal(body, len);
+	}
+
+	void Response::SetBodyInternal(const void* body, size_t len)
 	{
 		// Ensure sanity, as well as safety because BodyLength is uint32
 		HTTPBRIDGE_ASSERT(len <= 1024 * 1024 * 1024);
@@ -1849,13 +1963,6 @@ namespace hb
 		CreateBuilder();
 		BodyOffset = (ByteVectorOffset) FBB->CreateVector((const uint8_t*) body, len).o;
 		BodyLength = (uint32_t) len;
-	}
-
-	void Response::SetBodyPart(const void* part, size_t len)
-	{
-		SetBody(part, len);
-		if (HeaderCount() == 0)
-			Status = StatusMeta_BodyPart;
 	}
 
 	SendResult Response::Send()
@@ -1940,7 +2047,7 @@ namespace hb
 			flags |= httpbridge::TxFrameFlags_Final;
 
 		httpbridge::TxFrameBuilder frame(*FBB);
-		frame.add_frametype(httpbridge::TxFrameType_Header);
+		frame.add_frametype(Status == StatusMeta_BodyPart ? httpbridge::TxFrameType_Body : httpbridge::TxFrameType_Header);
 		frame.add_version(TranslateVersion(Version));
 		frame.add_flags(flags);
 		frame.add_channel(Channel);
@@ -2044,6 +2151,15 @@ namespace hb
 		{
 			buf = FBB->GetBufferPointer() + BodyOffset;
 		}
+	}
+
+	void Response::Free()
+	{
+		if (FBB != nullptr)
+			delete FBB;
+		HeaderIndex.Clear();
+		HeaderBuf.Clear();
+		Backend = nullptr;
 	}
 
 	void Response::CreateBuilder()

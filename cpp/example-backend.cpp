@@ -25,7 +25,7 @@ int main(int argc, char** argv)
 		hb::InFrame inframe;
 		if (backend.Recv(inframe))
 		{
-			hb::Request* request = inframe.Request;
+			hb::RequestPtr request = inframe.Request;
 
 			if (inframe.BodyBytesLen != 0)
 			{
@@ -61,7 +61,11 @@ int main(int argc, char** argv)
 				}
 				hb::Response response(request, hb::Status200_OK);
 				// write the request's body back out
-				std::string responseBody = "You said: ";
+				std::string responseBody = std::string("URL path: ") + request->Path().CStr() + "\n";
+				const char *qkey, *qval;
+				for (auto iter = request->NextQuery(0, qkey, qval); iter != 0; iter = request->NextQuery(iter, qkey, qval))
+					responseBody += std::string("URL query: ") + qkey + "=" + qval + "\n";
+				responseBody += "Body: ";
 				if (request->BodyBuffer.Count != 0)
 					responseBody.append((const char*) request->BodyBuffer.Data, request->BodyBuffer.Count);
 				responseBody.append("\n");

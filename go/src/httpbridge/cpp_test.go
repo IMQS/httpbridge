@@ -123,7 +123,7 @@ func restart(t *testing.T) {
 		front_server = &Server{}
 		front_server.HttpPort = serverFrontPort
 		front_server.BackendPort = serverBackendPort
-		front_server.Log.Level = LogLevelWarn
+		front_server.Log.Level = LogLevelWarn // You'll sometimes want to change this to LogLevelDebug when debugging.
 		go front_server.ListenAndServe()
 	}
 
@@ -248,16 +248,26 @@ func TestMain(m *testing.M) {
 	os.Exit(res)
 }
 
+func TestHelloWorld(t *testing.T) {
+	restart(t)
+	testPost(t, "/echo", "Hello!", 200, "Hello!")
+}
+
 func TestEcho(t *testing.T) {
 	restart(t)
 	withCombinations(t, func() {
-		testPost(t, "/echo", "Hello!", 200, "Hello!")
+		for chunked := 0; chunked < 2; chunked++ {
+			maxResponseSize := chunked * 4000
+			url := fmt.Sprintf("/echo?MaxTransmitBodyChunkSize=%v", maxResponseSize)
 
-		smallBuf := generateBuf(5 * 1024)
-		testPost(t, "/echo", smallBuf, 200, smallBuf)
+			testPost(t, url, "Hello!", 200, "Hello!")
 
-		bigBuf := generateBuf(3 * 1024 * 1024)
-		testPost(t, "/echo", bigBuf, 200, bigBuf)
+			smallBuf := generateBuf(5 * 1024)
+			testPost(t, url, smallBuf, 200, smallBuf)
+
+			bigBuf := generateBuf(3 * 1024 * 1024)
+			testPost(t, url, bigBuf, 200, bigBuf)
+		}
 	})
 }
 

@@ -41,6 +41,7 @@ int main(int argc, char** argv)
 
 	hb::Startup();
 
+	// Start our mini embedded HTTP/1.1 server, which forwards requests on to an httpbridge backend
 	hb::Server server;
 	SingleServer = &server;
 	server.ListenAndRun("127.0.0.1", 8080, 8081);

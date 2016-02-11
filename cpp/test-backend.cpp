@@ -7,6 +7,7 @@
 #include <stdio.h>
 #include <thread>
 #include <mutex>
+#include <algorithm>
 
 const int NumWorkerThreads = 4;
 
@@ -106,25 +107,27 @@ public:
 private:
 	struct LocalRequest
 	{
-		hb::Buffer Body;
+		hb::Buffer	Body;
+		size_t		MaxTransmitBodyChunkSize = 0;
 	};
 	std::unordered_map<RequestKey, LocalRequest*>	Requests;
 	std::vector<std::thread>						Threads;
-	std::vector<hb::Request*>						ThreadRequestQueue;
+	std::vector<hb::RequestPtr>						ThreadRequestQueue;
 	std::mutex										ThreadRequestQueueLock;
 
 	// Echos the body back
 	void HttpEcho(hb::InFrame& inframe, LocalRequest* lr)
 	{
+		if (inframe.IsHeader && inframe.Request->Query("MaxTransmitBodyChunkSize") != nullptr)
+			lr->MaxTransmitBodyChunkSize = atoi(inframe.Request->Query("MaxTransmitBodyChunkSize"));
+
 		if (!inframe.Request->IsBuffered)
 			lr->Body.Write(inframe.BodyBytes, inframe.BodyBytesLen);
 
 		if (inframe.IsLast)
 		{
 			const hb::Buffer& body = inframe.Request->IsBuffered ? inframe.Request->BodyBuffer : lr->Body;
-			hb::Response resp(inframe.Request);
-			resp.SetBody(body.Data, body.Count);
-			resp.Send();
+			SendResponseInChunks(inframe.Request, hb::Status200_OK, body.Data, body.Count, lr->MaxTransmitBodyChunkSize);
 		}
 	}
 
@@ -162,6 +165,30 @@ private:
 		Requests.erase(key);
 	}
 
+	static void SendResponseInChunks(hb::ConstRequestPtr request, hb::StatusCode status, const void* body, size_t bodyLen, size_t maxBodyChunkSize)
+	{
+		hb::Response head(request, status);
+		head.AddHeader_ContentLength(bodyLen);
+		auto res = head.Send();
+		if (res != hb::SendResult_All)
+			printf("Send head failed!\n");
+
+		size_t bodyPos = 0;
+		while (bodyPos < bodyLen)
+		{
+			size_t chunk = bodyLen;
+			if (maxBodyChunkSize != 0)
+				chunk = std::min(maxBodyChunkSize, bodyLen - bodyPos);
+			res = request->Backend->SendBodyPart(request, (uint8_t*) body + bodyPos, chunk);
+			if (res == hb::SendResult_All)
+				bodyPos += chunk;
+			else if (res == hb::SendResult_Closed)
+				printf("Backend closed\n");			// We should stress this path in tests
+			else
+				printf("SendResponse failed unexpectedly\n");
+		}
+	}
+
 	static void WorkerThread(Server* server)
 	{
 		int backoffMicroSeconds = 0;
@@ -169,7 +196,7 @@ private:
 		while (!server->Stop)
 		{
 			tick++;
-			hb::Request* req = nullptr;
+			hb::RequestPtr req = nullptr;
 			server->ThreadRequestQueueLock.lock();
 			if (server->ThreadRequestQueue.size() != 0)
 			{
@@ -194,11 +221,10 @@ private:
 					hb::Response r1(req);
 					int half = (int) req->BodyBuffer.Count / 2;
 					r1.AddHeader_ContentLength(req->BodyBuffer.Count);
-					r1.SetBodyPart(req->BodyBuffer.Data, half);
+					r1.SetBody(req->BodyBuffer.Data, half);
 					r1.Send();
 					hb::SleepNano(50 * 1000);
-					hb::Response r2(req);
-					r2.SetBodyPart(req->BodyBuffer.Data + half, req->BodyBuffer.Count - half);
+					auto r2 = hb::Response::MakeBodyPart(req, req->BodyBuffer.Data + half, req->BodyBuffer.Count - half);
 					r2.Send();
 				}
 			}

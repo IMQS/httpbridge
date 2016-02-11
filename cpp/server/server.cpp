@@ -521,7 +521,8 @@ void Server::ResetChannel(Channel& c)
 	c.ContentReceived = 0;
 	c.Headers.clear();
 	c.Method = "";
-	c.Request.Reset();
+	HTTPBRIDGE_PANIC("Implement Request.Reset");
+	//c.Request.Reset();
 	c.URI = "";
 	c.Version = hb::HttpVersion10;
 	c.IsHeaderFinished = false;

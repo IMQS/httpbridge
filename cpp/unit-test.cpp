@@ -123,8 +123,8 @@ void TestRequestQuerySplitter()
 {
 	auto test = [](const char* uri, const char* path, std::vector<std::pair<std::string, std::string>> pairs)
 	{
-		hb::Request r;
 		hb::Backend back;
+		hb::Request r;
 		SetupRequest(r, back, uri);
 		assert(r.ParseURI());
 		assert(strcmp(r.Path(), path) == 0);
@@ -143,9 +143,34 @@ void TestRequestQuerySplitter()
 	test("", "", {});
 	test("/a/path", "/a/path", {});
 	test("?a=b", "", { { "a", "b" } });
+	test("?a=", "", { { "a", "" } });
+	test("?a=&b=&c", "", { { "a", "" }, { "b", "" }, { "c", "" } });
+	test("?", "", {});
+	test("?h", "", { { "h", "" } });
+	test("?hello", "", { { "hello", "" } });
 	test("PATH?a=b", "PATH", { { "a", "b" } });
 	test("PATH???a=b", "PATH", { { "??a", "b" } });
 	test("%00%01%02?%00=%01", "\x00\x01\x02", { { "\x00", "\x01" } });
+
+	// test different combinations of lengths of key and value.
+	// When vlen = 1, then don't emit an equals sign.
+	for (int klen = 1; klen <= 5; klen++)
+	{
+		for (int vlen = -1; vlen <= 5; vlen++)
+		{
+			std::string q = "?", k, v;
+			for (int i = 0; i < klen; i++)
+				k += '1' + i;
+			for (int i = 0; i < vlen; i++)
+				v += 'a' + i;
+			
+			if (vlen == -1)
+				q += k;
+			else
+				q += k + "=" + v;
+			test(q.c_str(), "", { { k, v } });
+		}
+	}
 
 	auto expect_fail = [](const char* uri)
 	{
