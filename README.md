@@ -42,7 +42,7 @@ In order to build your own C++ backend, your need to include the following files
 ## Building the example Go server
 * Change directory to `go`
 * `env.bat` (Windows)
-* `. env.sh` (Unix)
+* `. env.sh` (Unix) - note this is NOT the same as `./env.sh`, because we need to alter environment variables.
 * `go get github.com/google/flatbuffers/go`
 * `go run cmd/example-server.go`
 * You should now be able to launch the example C++ backend. Once you have both the Go server and C++ backend running,
@@ -61,11 +61,6 @@ Build the unit-test project using tundra, and run the executable.
 * Ensure that your compiler is on the PATH (on Windows, this usually means running `vcvarsall.bat amd64`)
 * go test httpbridge
 
-To get line coverage:
-
-* go test httpbridge -coverprofile=coverage.out
-* go tool cover -html=coverage.out
-
 The Go test suite automatically compiles the C++ backend tester (using CL or GCC), and launches it.
 
 If you need to debug the C++ code, that is normally launched by the Go test suite, then you can launch the C++ server
@@ -77,7 +72,8 @@ To raise the logging level of the Go server, alter it inside restart() in cpp_te
 I'm still experimenting with integrating valgrind into the test suite. For right now, you can get some example output by running the tests like this:
 * go test httpbridge -v -valgrind -run Thread
 
-For more details on testing, see testing.md
+### More information on testing
+For more details on testing, including Valgrind and line coverage, see testing.md
 
 ## How to write C++ code that uses httpbridge
 httpbridge forces upon you an event-driven model. The events that you wait for are HTTP frames. One or more

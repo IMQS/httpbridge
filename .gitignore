@@ -10,4 +10,5 @@ vs2013
 go/coverage.out
 go/src/httpbridge/test-backend
 go/src/httpbridge/test-backend.exe
+coverage-report
 

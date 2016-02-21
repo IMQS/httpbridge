@@ -20,6 +20,8 @@
 #define assert(exp) (void) ((exp) || (printf("Error: %s:%d:\n %s\n", __FILE__, __LINE__, #exp), BREAKME, exit(1), 0))
 #define run(f) (printf("%-30s\n", #f), f())
 
+bool streq(const char* a, const char* b) { return strcmp(a, b) == 0; }
+
 void* AllocOrDie(size_t size)
 {
 	void* b = malloc(size);
@@ -207,9 +209,26 @@ void TestRequestQuerySplitter()
 	}
 }
 
+void TestUtilFunctions()
+{
+	char buf[100];
+	hb::U64toa(123456789012345ull, buf, sizeof(buf));
+	assert(streq(buf, "123456789012345"));
+
+	hb::U64toa(0, buf, sizeof(buf));
+	assert(streq(buf, "0"));
+
+	// buffer too small. emits back two digits, plus null terminator
+	hb::U64toa(123456789012345ull, buf, 3);
+	assert(streq(buf, "45"));
+
+	assert( hb::uatoi64("123456789012345", 15) == 123456789012345ull);
+}
+
 int main(int argc, char** argv)
 {
 	run(TestUrlQueryParser);
 	run(TestRequestQuerySplitter);
+	run(TestUtilFunctions);
 	return 0;
 }

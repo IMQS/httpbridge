@@ -70,6 +70,7 @@ Build {
 		}
 
 		Default(example_backend)
+		Default(unit_test)
 		Default(server)
 	end,
 
@@ -82,10 +83,11 @@ Build {
 			{ "-std=c++11"; Config = {"*-gcc-*", "*-clang-*"} },
 		},
 		GENERATE_PDB = {
-			{ "0"; Config = "*-msvc-release" },
-			{ "1"; Config = { "*-msvc-debug", "*-msvc-production" } },
+			{ "1"; Config = "win*" },
 		},
 	},
+
+	Variants = { "debug", "release" },
 
 	Configs = {
 		Config {
@@ -126,7 +128,6 @@ Build {
 			VariantMappings = {
 				['release']    = 'Release',
 				['debug']      = 'Debug',
-				['production'] = 'Production',
 			},
 		},
 		-- Override solutions to generate and what units to put where.
