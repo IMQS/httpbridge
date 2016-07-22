@@ -148,8 +148,8 @@ namespace hb
 		case Status509_Unassigned:                      return "Unassigned";
 		case Status510_Not_Extended:                    return "Not Extended";
 		case Status511_Network_Authentication_Required: return "Network Authentication Required";
+		default:                                        return "Unrecognized HTTP Status Code";
 		}
-		return "Unrecognized HTTP Status Code";
 	}
 
 
