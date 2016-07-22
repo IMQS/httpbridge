@@ -31,8 +31,9 @@ __MSVC:__ `cl -Icpp/flatbuffers/include /EHsc Ws2_32.lib cpp/example-backend.cpp
 __GCC:__ `gcc -Icpp/flatbuffers/include -std=c++11 cpp/example-backend.cpp cpp/http-bridge.cpp -lstdc++ -o example-backend`  
 __Clang:__ `clang -Icpp/flatbuffers/include -std=c++11 cpp/example-backend.cpp cpp/http-bridge.cpp -lstdc++ -o example-backend`  
 
-In order to build your own C++ backend, your need to include the following files into your project. There is no prepackaged
-"static library" or "shared library". Just include these files and you're done.
+In order to build your own C++ backend, you need to include the following files into your project. There is no prepackaged
+"static library" or "shared library". Just include these files and you're done. However, if you do want to create a static
+or shared library, nothing stops you doing that.
 
 * http-bridge.cpp
 * http-bridge.h
@@ -76,6 +77,8 @@ I'm still experimenting with integrating valgrind into the test suite. For right
 For more details on testing, including Valgrind and line coverage, see testing.md
 
 ## How to write C++ code that uses httpbridge
+To get started, copy code from [example-backend.cpp](cpp/example-backend.cpp).
+
 httpbridge forces upon you an event-driven model. The events that you wait for are HTTP frames. One or more
 frames make up a single request. Often, a request is just a single frame. You can also get httpbridge to
 buffer up all the frames of a small request, so that you just receive a single event when that request
