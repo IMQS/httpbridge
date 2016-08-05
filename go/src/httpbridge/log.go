@@ -20,6 +20,8 @@ const (
 const timeFormat = "2006-01-02T15:04:05.000000Z0700"
 const lineTerminator = "\n"
 
+var logLevelString []string = []string{"[D]", "[I]", "[W]", "[E]", "[F]"}
+
 type Logger struct {
 	Target io.Writer
 	Level  LogLevel
@@ -71,7 +73,7 @@ func (g *Logger) write(level LogLevel, m string) {
 		if len(m) == 0 || m[len(m)-1] != '\n' {
 			terminator = lineTerminator
 		}
-		msg := time.Now().Format(timeFormat) + " " + m + terminator
+		msg := time.Now().Format(timeFormat) + " " + logLevelString[level] + " " + m + terminator
 		g.Target.Write([]byte(msg))
 	}
 	if level == LogLevelFatal {
