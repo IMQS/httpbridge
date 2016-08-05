@@ -18,11 +18,21 @@ type backendID int64
 type streamID string
 type responseChan chan *TxFrame
 
+// HttpBridge Server
+//
+// When Stop() is called, we try to stop sending all communication, to backends or clients.
+// We assume that the closed TCP socket will be interpreted correctly by backends and clients.
+// The alternative is to send an ABORT frame to backends, but that poses the risk of delaying
+// shutdown time significantly, for no apparent gain.
 type Server struct {
-	HttpPort       string
-	BackendPort    string
-	BackendTimeout time.Duration
-	Log            Logger
+	// If you already have an HTTP listener, then you can forward requests from there
+	// to this Server, by calling Server.ServeHTTP(). In such a case, you'll want to
+	// set DisableHttpListener to true.
+	DisableHttpListener bool
+	HttpPort            string
+	BackendPort         string
+	BackendTimeout      time.Duration
+	Log                 Logger
 
 	httpServer      http.Server
 	httpListener    net.Listener
@@ -45,6 +55,7 @@ type Server struct {
 // We place all atomic int64 variables in a struct of their own, to guarantee 64-bit alignment.
 type serverAtomics struct {
 	nextChannel uint64
+	stopped     int32
 }
 
 type backendConnection struct {
@@ -54,6 +65,7 @@ type backendConnection struct {
 
 func (s *Server) ListenAndServe() error {
 	var err error
+	enableHTTPListener := !s.DisableHttpListener
 	s.nextBackendID = 1
 	s.atomics = new(serverAtomics)
 	s.responses = make(map[streamID]responseChan)
@@ -67,31 +79,38 @@ func (s *Server) ListenAndServe() error {
 	if httpPort == "" {
 		httpPort = ":http"
 	}
+	if !enableHTTPListener {
+		httpPort = "disabled"
+	}
 	backendPort := s.BackendPort
 	if backendPort == "" {
 		backendPort = ":81"
 	}
-	s.Log.Warnf("http-bridge server starting")
-	s.Log.Warnf("  http port     %v", httpPort)
-	s.Log.Warnf("  backend port  %v", backendPort)
+	s.Log.Infof("http-bridge server starting (http port %v, backend port %v)", httpPort, backendPort)
 	s.httpServer.Handler = s
-	if s.httpListener, err = net.Listen("tcp", httpPort); err != nil {
-		return err
+	if enableHTTPListener {
+		if s.httpListener, err = net.Listen("tcp", httpPort); err != nil {
+			return err
+		}
 	}
 	if s.backendListener, err = net.Listen("tcp", backendPort); err != nil {
 		return err
 	}
 	done := make(chan bool)
-	go func() {
-		s.httpServer.Serve(s.httpListener)
-		done <- true
-	}()
+	if enableHTTPListener {
+		go func() {
+			s.httpServer.Serve(s.httpListener)
+			done <- true
+		}()
+	}
 	go func() {
 		s.AcceptBackendConnections()
 		done <- true
 	}()
-	<-done
-	<-done
+	if enableHTTPListener {
+		<-done // wait for HTTP accepter to finish
+	}
+	<-done // wait for Backend accepter to finish
 	return nil
 }
 
@@ -125,7 +144,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	hasBody := req.Body != nil && req.ContentLength != 0
 
 	if s.Log.Level <= LogLevelDebug {
-		s.Log.Debugf("Request %v:%v started (%v)", channel, stream, req.URL.String())
+		s.Log.Debugf("HB Request %v:%v started (%v)", channel, stream, req.URL.String())
 	}
 
 	if !s.sendHeaderFrame(w, req, backend, channel, stream, hasBody) {
@@ -139,7 +158,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 
 	s.sendResponse(w, req, backend, channel, stream, responseChan)
 
-	s.Log.Infof("Request %v:%v finished", channel, stream)
+	s.Log.Debugf("HB Request %v:%v finished", channel, stream)
 }
 
 func (s *Server) sendHeaderFrame(w http.ResponseWriter, req *http.Request, backend *backendConnection, channel, stream uint64, hasBody bool) bool {
@@ -208,9 +227,12 @@ func (s *Server) sendBody(w http.ResponseWriter, req *http.Request, backend *bac
 	var dynamic_buf []byte
 	dynamic_buf_size := int(clampInt64(req.ContentLength, int64(len(static_buf)), 64*1024))
 
-	s.Log.Debug("sendBody START")
+	s.Log.Debug("HB sendBody START")
 
 	for !eof {
+		if s.isStopped() {
+			return false
+		}
 		var buf []byte
 		// Only upgrade to a larger buffer if the user has actually sent 8KB. This limits amplification attacks.
 		if total_body_sent >= 8*1024 && dynamic_buf_size >= len(static_buf) {
@@ -229,7 +251,7 @@ func (s *Server) sendBody(w http.ResponseWriter, req *http.Request, backend *bac
 			return false
 		}
 
-		s.Log.Debugf("sendBody %v", nread)
+		s.Log.Debugf("HB sendBody %v", nread)
 
 		builder := flatbuffers.NewBuilder(nread + 100)
 		body := builder.CreateByteVector(buf[:nread])
@@ -289,6 +311,9 @@ func (s *Server) sendResponse(w http.ResponseWriter, req *http.Request, backend 
 	hasTimedOut := false
 
 	for remainingBytes > 0 && !hasTimedOut {
+		if s.isStopped() {
+			return
+		}
 		select {
 		case frame := <-responseChan:
 			res := s.sendResponseFrame(w, req, backend, channel, stream, frame)
@@ -300,7 +325,7 @@ func (s *Server) sendResponse(w http.ResponseWriter, req *http.Request, backend 
 		case <-time.After(s.BackendTimeout):
 			hasTimedOut = true
 			http.Error(w, "httpbridge backend timeout", http.StatusGatewayTimeout)
-			s.Log.Warnf("backend timeout: %v:%v", channel, stream)
+			s.Log.Warnf("httpbridge backend timeout: %v:%v", channel, stream)
 			break
 		}
 	}
@@ -311,12 +336,17 @@ func (s *Server) sendResponse(w http.ResponseWriter, req *http.Request, backend 
 
 	// Drain the response channel
 	for {
+		if s.isStopped() {
+			return
+		}
 		select {
 		case frame := <-responseChan:
 			if (frame.Flags() & TxFrameFlagsFinal) != 0 {
-				s.Log.Warnf("timed-out response is finished: %v:%v", channel, stream)
+				s.Log.Warnf("httpbridge timed-out response is finished: %v:%v", channel, stream)
 				return
 			}
+		case <-time.After(100 * time.Millisecond):
+			// Do nothing. Just here to ensure that we check for Stop every now and then
 		}
 	}
 }
@@ -326,7 +356,7 @@ func (s *Server) sendResponse(w http.ResponseWriter, req *http.Request, backend 
 func (s *Server) sendResponseFrame(w http.ResponseWriter, req *http.Request, backend *backendConnection, channel, stream uint64, frame *TxFrame) int64 {
 	remaining_bytes := int64(0)
 	body := frame.BodyBytes()
-	s.Log.Debugf("sendResponseFrame: %v:%v %v", channel, stream, frame.Frametype())
+	s.Log.Debugf("HB sendResponseFrame: %v:%v %v", channel, stream, frame.Frametype())
 	if frame.Frametype() == TxFrameTypeHeader {
 		line := &TxHeaderLine{}
 		frame.Headers(line, 0)
@@ -350,27 +380,27 @@ func (s *Server) sendResponseFrame(w http.ResponseWriter, req *http.Request, bac
 			// We're explicitly not supporting multiple lines with the same key here. So multiple cookies won't work; I think.
 			keyStr := string(key)
 			valStr := string(val)
-			s.Log.Debugf("Sending header (%v)=(%v)", keyStr, valStr)
+			s.Log.Debugf("HB sending header (%v)=(%v)", keyStr, valStr)
 			w.Header().Set(keyStr, valStr)
 			if keyStr == "Content-Length" {
 				remaining_bytes, _ = strconv.ParseInt(valStr, 10, 64)
 				remaining_bytes -= int64(len(body)) // We're going to send this body data now, so subtract it from the remaining amount
 			}
 		}
-		s.Log.Debugf("Writing status (%v)", statusCode)
+		s.Log.Debugf("HB Writing status (%v)", statusCode)
 		w.WriteHeader(statusCode)
 	}
-	s.Log.Debugf("Writing body (len = %v)", len(body))
+	s.Log.Debugf("HB Writing body (len = %v)", len(body))
 	for start := 0; start != len(body); {
 		written, err := w.Write(body[start:])
 		if err != nil {
-			s.Log.Errorf("Error writing body: %v:%v %v", channel, stream, err)
+			s.Log.Errorf("httpbridge error writing body: %v:%v %v", channel, stream, err)
 			break
 		}
-		s.Log.Debugf("Wrote %v body bytes", written)
+		s.Log.Debugf("HB Wrote %v body bytes", written)
 		start += written
 	}
-	s.Log.Debugf("Done writing response frame")
+	s.Log.Debugf("HB Done writing response frame")
 	if frame.Frametype() == TxFrameTypeHeader {
 		return remaining_bytes
 	} else {
@@ -382,7 +412,7 @@ func (s *Server) AcceptBackendConnections() {
 	for {
 		con, err := s.backendListener.Accept()
 		if err != nil {
-			s.Log.Errorf("Error in Bridge Connection Accept: %v", err)
+			s.Log.Errorf("Error in HttpBridge Connection Accept: %v", err)
 			break
 		}
 		backend := &backendConnection{
@@ -418,7 +448,7 @@ func (s *Server) handleBackendConnection(backend *backendConnection) {
 	// that ends up sending the data back over HTTP.
 	// To keep things simple, we never read over a frame boundary.
 	s.addBackend(backend)
-	s.Log.Warnf("New backend connection %v", backend.id)
+	s.Log.Infof("New httpbridge backend connection %v", backend.id)
 	var err error
 	buf := []byte{}
 	bufSize := 0 // distinct from len(buf). bufSize is how many bytes we've actually read.
@@ -444,21 +474,21 @@ func (s *Server) handleBackendConnection(backend *backendConnection) {
 			break
 		}
 		bufSize += nbytes
-		s.Log.Debugf("Received %v bytes from backend %v (%v)", nbytes, backend.id, bufSize)
+		s.Log.Debugf("HB Received %v bytes from backend %v (%v)", nbytes, backend.id, bufSize)
 		if frameSize != 0 && bufSize >= 4+frameSize {
 			frame := GetRootAsTxFrame(buf[4:], 0)
 			rchan := s.findStreamChannel(frame.Channel(), frame.Stream())
 			if rchan != nil {
-				s.Log.Debugf("Sending frame to chan")
+				s.Log.Debugf("HB Sending frame to chan")
 				rchan <- frame
 			}
 			buf = []byte{}
 			bufSize = 0
 		} else {
-			s.Log.Debugf("Have %v/%v frame bytes", bufSize-4, frameSize)
+			s.Log.Debugf("HB Have %v/%v frame bytes", bufSize-4, frameSize)
 		}
 	}
-	s.Log.Warnf("Closing backend connection %v (%v)", backend.id, err)
+	s.Log.Infof("Closing httpbridge backend connection %v (%v)", backend.id, err)
 	s.removeBackend(backend)
 }
 
@@ -497,7 +527,7 @@ func (s *Server) registerStream(channel, stream uint64) responseChan {
 	s.responsesLock.Lock()
 	sid := makeStreamID(channel, stream)
 	if _, ok := s.responses[sid]; ok {
-		s.Log.Fatalf("registerStream called twice on the same stream (%v:%v)", channel, stream)
+		s.Log.Fatalf("httpbridge registerStream called twice on the same stream (%v:%v)", channel, stream)
 	}
 	c := make(responseChan)
 	s.responses[sid] = c
@@ -509,7 +539,7 @@ func (s *Server) unregisterStream(channel, stream uint64) {
 	s.responsesLock.Lock()
 	sid := makeStreamID(channel, stream)
 	if _, ok := s.responses[sid]; !ok {
-		s.Log.Fatalf("unregisterStream called on a non-existing stream (%v:%v)", channel, stream)
+		s.Log.Fatalf("httpbridge unregisterStream called on a non-existing stream (%v:%v)", channel, stream)
 	}
 	delete(s.responses, sid)
 	s.responsesLock.Unlock()
@@ -520,11 +550,21 @@ func (s *Server) findStreamChannel(channel, stream uint64) responseChan {
 	sid := makeStreamID(channel, stream)
 	rchan, ok := s.responses[sid]
 	if !ok {
-		s.Log.Warnf("findStreamChannel failed. Looks like backend has timed out (channel %v, stream %v)", channel, stream)
+		s.Log.Warnf("httpbridge findStreamChannel failed. Looks like backend has timed out (channel %v, stream %v)", channel, stream)
 		return nil
 	}
 	s.responsesLock.Unlock()
 	return rchan
+}
+
+func (s *Server) Stop() {
+	atomic.StoreInt32(&s.atomics.stopped, 1)
+	s.backendListener.Close()
+	s.httpListener.Close()
+}
+
+func (s *Server) isStopped() bool {
+	return atomic.LoadInt32(&s.atomics.stopped) != 0
 }
 
 func makeStreamID(channel, stream uint64) streamID {
