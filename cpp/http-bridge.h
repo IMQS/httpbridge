@@ -86,7 +86,7 @@ HTTPBRIDGE_API HTTPBRIDGE_NORETURN_PREFIX void BuiltinTrap() HTTPBRIDGE_NORETURN
 	class Request;
 	class Response;
 	class InFrame;
-	class HeaderCacheRecv;		// Implemented in http-bridge.cpp
+	class HeaderCacheRecv;		// Implementation and header inside in http-bridge.cpp
 
 	typedef std::shared_ptr<Request>		RequestPtr;
 	typedef std::shared_ptr<const Request>	ConstRequestPtr;
@@ -373,7 +373,7 @@ HTTPBRIDGE_API HTTPBRIDGE_NORETURN_PREFIX void BuiltinTrap() HTTPBRIDGE_NORETURN
 		void		WriteUInt64(uint64_t v);				// Uses GrowCapacityOrPanic()
 		void		GrowCapacityOrPanic();
 		bool		TryGrowCapacity();						// Returns false if allocation fails
-		bool		IsPointerInside(const void* p) const { return ((size_t) ((uint8_t*) p - Data)) < Capacity; }
+		bool		IsPointerInside(const void* p) const { return ((uintptr_t) ((uint8_t*) p - Data)) < (uintptr_t) Capacity; }
 	};
 
 #ifdef _MSC_VER
@@ -499,6 +499,7 @@ namespace hb
 	};
 
 	/* HTTP request
+
 	Note that header keys and values are always null terminated. The HTTP/2 spec allows headers
 	to contain arbitrary binary data, so you may be missing something by not using the header accessor functions
 	that allow you to read through null characters, but that's your choice.
@@ -506,7 +507,7 @@ namespace hb
 	A Request object is typically used as a shared_ptr, because the lifetime of requests varies greatly,
 	and other solutions are tricky to get right. When implementing httpbridge services, you must always
 	use RequestPtr or ConstRequestPtr (aka shared_ptr<Request> and shared_ptr<const Request>) when storing
-	a Request object. Shared_ptr's reference counting only works if there is an unbroken chain of shared_ptr
+	a Request object. shared_ptr's reference counting only works if there is an unbroken chain of shared_ptr
 	objects from start to finish. If you use a Request* object somewhere along the line, then the chain is
 	broken. So just stick to using RequestPtr or ConstRequestPtr everywhere, and things will just work.
 
@@ -598,8 +599,8 @@ namespace hb
 	public:
 		RequestPtr		Request;
 		bool			IsHeader;			// Is this the first frame of the request? Note that IsHeader and IsLast are both true for a request with an empty body.
-		bool			IsLast;				// Is this the last frame of the request? If true, then the request is deleted by the frame's destructor.
-		bool			IsAborted;			// True if the stream has been aborted (ie the browser connection timed out, etc). Such a frame contains no data, and IsLast is guaranteed to be false.
+		bool			IsLast;				// Is this the last frame of the request?
+		bool			IsAborted;			// True if the stream has been aborted (ie the browser connection timed out, etc). Such a frame contains no data, and IsLast is false.
 
 		uint8_t*		BodyBytes;			// Body bytes in this frame
 		size_t			BodyBytesLen;		// Length of BodyBytes
@@ -607,11 +608,8 @@ namespace hb
 		InFrame();
 		~InFrame();
 
-		void	Reset();					// Calls destructor and re-initializes
-		void	DeleteRequestAndReset();	// Forces destruction of the Request object (if any) and then calls Reset
-
-		// Calls Request->Backend->ResentWhenBodyIsDone(this)
-		bool	ResendWhenBodyIsDone();
+		void	Reset();					// Reset the frame object to it's default state.
+		bool	ResendWhenBodyIsDone();		// Calls Request->Backend->ResentWhenBodyIsDone(this)
 
 	private:
 		InFrame(const InFrame&) = delete;
@@ -703,15 +701,4 @@ namespace hb
 	};
 }
 
-//namespace std
-//{
-//	inline void swap(hb::Request& a, hb::Request& b)
-//	{
-//		hb::Request tmp;
-//		memcpy(&tmp, &a, sizeof(tmp));
-//		memcpy(&a, &b, sizeof(tmp));
-//		memcpy(&b, &tmp, sizeof(tmp));
-//		memset(&tmp, 0, sizeof(tmp));
-//	}
-//}
 #endif

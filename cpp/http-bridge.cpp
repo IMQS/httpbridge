@@ -887,17 +887,8 @@ namespace hb
 		{
 			if (!Request->BodyBuffer.IsPointerInside(BodyBytes))
 				Free(BodyBytes);
-
-			if (IsAborted)
-			{
-				//Request->DecrementLiveness();
-				//Request->DecrementLiveness();
-			}
-			else if (IsLast)
-			{
-				//Request->DecrementLiveness();
-			}
-			// Note that Request can have destroyed itself by this point, so NULL is the only legal value for it now
+			// This is often the point at which the last reference to Request* is lost, so 
+			// Request is likely to be destroyed by this next line.
 			Request = nullptr;
 		}
 
@@ -907,17 +898,6 @@ namespace hb
 
 		BodyBytes = nullptr;
 		BodyBytesLen = 0;
-	}
-
-	void InFrame::DeleteRequestAndReset()
-	{
-		if (Request != nullptr)
-		{
-			//Request->DecrementLiveness();
-			//Request->DecrementLiveness();
-		}
-		Request = nullptr;
-		Reset();
 	}
 
 	bool InFrame::ResendWhenBodyIsDone()
@@ -970,15 +950,6 @@ namespace hb
 
 	void Backend::Close()
 	{
-		// Pull items out of CurrentRequests hash map, because we can't iterate over them while deleting them
-		//std::vector<Request*> waiting;
-		//for (auto& item : CurrentRequests)
-		//	waiting.push_back(item.second.Request);
-		//
-		//for (auto item : waiting)
-		//{
-		//	while (!item->DecrementLiveness()) {}
-		//}
 		CurrentRequests.clear();
 
 		HTTPBRIDGE_ASSERT(BufferedRequestsTotalBytes == 0);
@@ -1259,6 +1230,7 @@ namespace hb
 				else if (txframe->frametype() == httpbridge::TxFrameType_Abort)
 				{
 					inframe.IsAborted = true;
+					inframe.IsLast = false;
 				}
 				else
 				{
@@ -1277,7 +1249,7 @@ namespace hb
 					{
 						SendResponse(txframe->channel(), txframe->stream(), Status503_Service_Unavailable);
 					}
-					inframe.DeleteRequestAndReset();
+					inframe.Reset();
 					return RecvResult_NoData;
 				}
 				return RecvResult_Data;
