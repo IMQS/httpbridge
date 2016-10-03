@@ -35,7 +35,7 @@ int main(int argc, char** argv)
 
 			/* The following block demonstrates how you explicitly inform Backend that you want this request to be buffered:
 
-			if (inframe.IsHeader && !inframe.IsLast)
+			if (inframe.IsHeader && !inframe.IsLast && !request->IsBuffered)
 			{
 				if (... request matches criteria ...)
 				{

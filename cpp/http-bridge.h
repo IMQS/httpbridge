@@ -374,6 +374,7 @@ HTTPBRIDGE_API HTTPBRIDGE_NORETURN_PREFIX void BuiltinTrap() HTTPBRIDGE_NORETURN
 		void		GrowCapacityOrPanic();
 		bool		TryGrowCapacity();						// Returns false if allocation fails
 		bool		IsPointerInside(const void* p) const { return ((uintptr_t) ((uint8_t*) p - Data)) < (uintptr_t) Capacity; }
+		std::string AsString() const { return std::string((const char*) Data, Count); }
 	};
 
 #ifdef _MSC_VER

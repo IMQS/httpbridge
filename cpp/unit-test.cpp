@@ -105,6 +105,12 @@ void TestUrlQueryParser()
 		checkparse_content("%a", "");
 		end();
 	}
+	{
+		hb::UrlQueryParser p("a+b");
+		checkparse_points(0, 3, -1, 0);
+		checkparse_content("a b", "");
+		end();
+	}
 
 
 #undef checkparse_points

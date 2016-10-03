@@ -44,7 +44,7 @@ or shared library, nothing stops you doing that.
 * Change directory to `go`
 * `env.bat` (Windows)
 * `. env.sh` (Unix) - note this is NOT the same as `./env.sh`, because we need to alter environment variables.
-* `go get github.com/google/flatbuffers/go`
+* Ensure git submodules are up to date `git submodule update --init`
 * `go run cmd/example-server.go`
 * You should now be able to launch the example C++ backend. Once you have both the Go server and C++ backend running,
 you can try `curl localhost:8080`, and you should get a reply.

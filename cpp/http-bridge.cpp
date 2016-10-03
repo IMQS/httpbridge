@@ -1315,7 +1315,10 @@ namespace hb
 			auto cr = CurrentRequests.find(MakeStreamKey(txframe->channel(), txframe->stream()));
 			if (cr == CurrentRequests.end())
 			{
-				AnyLog()->Logf("Received body bytes for unknown stream [%llu:%llu]", txframe->channel(), txframe->stream());
+				flatbuffers::uoffset_t bodySize = 0;
+				if (txframe->body())
+					bodySize = txframe->body()->size();
+				AnyLog()->Logf("Received body bytes for unknown stream [%llu:%llu] (%d body bytes)", txframe->channel(), txframe->stream(), (int) bodySize);
 				CurrentRequestLock.unlock();
 				return FrameInvalid;
 			}
@@ -1459,7 +1462,12 @@ namespace hb
 				i += 2;
 			}
 			else
-				decodedPath[j++] = buf[i];
+			{
+				if (buf[i] == '+')
+					decodedPath[j++] = buf[i];
+				else
+					decodedPath[j++] = buf[i];
+			}
 		}
 		if (addNullTerminator)
 			decodedPath[j++] = 0;
@@ -1556,7 +1564,12 @@ namespace hb
 				p += 2;
 			}
 			else
-				decoded[j++] = buf[p];
+			{
+				if (buf[p] == '+')
+					decoded[j++] = ' ';
+				else
+					decoded[j++] = buf[p];
+			}
 		}
 		if (addNullTerminator)
 			decoded[j++] = 0;
