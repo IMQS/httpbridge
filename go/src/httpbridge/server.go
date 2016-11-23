@@ -43,9 +43,9 @@ type Server struct {
 	backendsLock  sync.Mutex
 	nextBackendID backendID
 
-	// responses holds response frames for each HTTP2 stream
+	// 'responses' holds a response channel for each HTTP2 stream
 	// Access to 'responses' is guarded by 'responsesLock'. You do not need to own the lock
-	// to send data to a channel. The lock is merely guarding the map data structure.
+	// to send data to a channel. The lock is only guarding the map data structure.
 	responsesLock sync.Mutex
 	responses     map[streamID]responseChan
 
@@ -59,8 +59,9 @@ type serverAtomics struct {
 }
 
 type backendConnection struct {
-	con net.Conn
-	id  backendID
+	con            net.Conn
+	id             backendID
+	disconnectChan chan bool // We never send anything to this channel. But a select{} will wake when the channel is closed, which is what we do.
 }
 
 func (s *Server) ListenAndServe() error {
@@ -322,11 +323,13 @@ func (s *Server) sendResponse(w http.ResponseWriter, req *http.Request, backend 
 			} else {
 				remainingBytes -= res
 			}
+		case <-backend.disconnectChan:
+			http.Error(w, "httpbridge backend disconnect", http.StatusBadGateway)
+			return
 		case <-time.After(s.BackendTimeout):
 			hasTimedOut = true
 			http.Error(w, "httpbridge backend timeout", http.StatusGatewayTimeout)
 			s.Log.Warnf("httpbridge backend timeout: %v:%v", channel, stream)
-			break
 		}
 	}
 
@@ -416,8 +419,9 @@ func (s *Server) AcceptBackendConnections() {
 			break
 		}
 		backend := &backendConnection{
-			con: con,
-			id:  0,
+			con:            con,
+			id:             0,
+			disconnectChan: make(chan bool),
 		}
 		go s.handleBackendConnection(backend)
 	}
@@ -501,6 +505,7 @@ func (s *Server) addBackend(backend *backendConnection) {
 }
 
 func (s *Server) removeBackend(backend *backendConnection) {
+	close(backend.disconnectChan)
 	s.backendsLock.Lock()
 	for i, b := range s.backends {
 		if b == backend {
