@@ -116,12 +116,11 @@ For all other requests, you must send a response.
 Most responses are sent with a single Response object, which includes the entire body of the response.
 However, there are cases where it makes sense to split the response into multiple frames (for example
 a file download). In order to send a response over multiple frames, make sure that the initial Response
-has a Content-Length header field set. Thereafter, use Backend.SendBodyPart() to stream out the rest
-of the response body. When the last byte has been sent, the request object will be deleted. An implication
+has a Content-Length header field set. Thereafter, use Backend.SendBodyPart() repeatedly to stream out the rest
+of the response body. Or equivalently, use Response::MakeBodyPart() and send that Response object.
+When the last byte has been sent, the request object will be deleted. An implication
 of this mechanism is that you cannot stream a result without specifying it's size up front (via the
 Content-Length header).
-
-TODO: Finish implementation of streaming responses on the Go side, and add a test
 
 #### Threads
 You must poll Backend from a single thread. The same thread that calls Connect() must also call
@@ -140,10 +139,8 @@ multiple threads. The exact list of functions that are safe to call from multipl
 * RequestDestroyed()
 * AnyLog()
 
-TODO: Add a mode to test-backend that executes requests on multiple threads, and see if we can
-get any race conditions to occur.
-
 ## TODO
 * Implement rate limiting mechanism, which relies on the HTTP server telling us that the TCP socket
-doesn't want any more data yet. This would require a new kind of frame that gets sent from server
-to backend.
+connected to the client browser doesn't want any more data yet. This would require a new kind of frame
+that gets sent from server to backend. At present, I suspect we're in very bad territory here for large
+file transmissions.
