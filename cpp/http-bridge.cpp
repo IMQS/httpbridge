@@ -1862,8 +1862,7 @@ namespace hb
 
 	Response Response::MakeBodyPart(ConstRequestPtr request, const void* part, size_t len)
 	{
-		Response r;
-		r.Backend = request->Backend;
+		Response r(request);
 		r.SetBodyInternal(part, len);
 		r.Status = StatusMeta_BodyPart;
 		return r;
