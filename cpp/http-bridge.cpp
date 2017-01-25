@@ -1946,7 +1946,11 @@ namespace hb
 		HTTPBRIDGE_ASSERT(BodyOffset == 0 && BodyLength == 0);
 
 		CreateBuilder();
-		BodyOffset = (ByteVectorOffset) FBB->CreateVector((const uint8_t*) body, len).o;
+
+		FBB->NotNested();
+		FBB->StartVector(len, sizeof(uint8_t));
+		FBB->PushBytes((const uint8_t*) body, len);
+		BodyOffset = (ByteVectorOffset) FBB->EndVector(len);
 		BodyLength = (uint32_t) len;
 	}
 
