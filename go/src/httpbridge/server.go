@@ -122,9 +122,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		defer req.Body.Close()
 	}
 
-	backend := s.findBackend(req)
-	if backend == nil {
-		http.Error(w, "No httpbridge backend is listening", http.StatusGatewayTimeout)
+	backend, err := s.findBackend(req)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusGatewayTimeout)
 		return
 	}
 
@@ -452,7 +452,7 @@ func (s *Server) handleBackendConnection(backend *backendConnection) {
 	// that ends up sending the data back over HTTP.
 	// To keep things simple, we never read over a frame boundary.
 	s.addBackend(backend)
-	s.Log.Infof("New httpbridge backend connection %v", backend.id)
+	s.Log.Infof("New httpbridge backend connection on port %v. ID: %v", s.BackendPort, backend.id)
 	var err error
 	buf := []byte{}
 	bufSize := 0 // distinct from len(buf). bufSize is how many bytes we've actually read.
@@ -518,14 +518,16 @@ func (s *Server) removeBackend(backend *backendConnection) {
 
 // At some point we'll probably want to have multiple backends, matched by HTTP route.
 // Right now we simply return the one and only backend, if it exists. Otherwise null.
-func (s *Server) findBackend(req *http.Request) *backendConnection {
+// Of course, if we have more than 1 backend, we could just round-robin between them,
+// or whatever. BUT, before we do that, we need to establish a scheme, and do it properly.
+func (s *Server) findBackend(req *http.Request) (*backendConnection, error) {
 	s.backendsLock.Lock()
-	var match *backendConnection
+	defer s.backendsLock.Unlock()
 	if len(s.backends) == 1 {
-		match = s.backends[0]
+		return s.backends[0], nil
+	} else {
+		return nil, fmt.Errorf("Expected 1 httpbridge backend, but found %v", len(s.backends))
 	}
-	s.backendsLock.Unlock()
-	return match
 }
 
 func (s *Server) registerStream(channel, stream uint64) responseChan {
