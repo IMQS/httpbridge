@@ -122,10 +122,25 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		defer req.Body.Close()
 	}
 
-	backend, err := s.findBackend(req)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusGatewayTimeout)
-		return
+	// Temp: We currently have problems between the router's httpbridge server and the client in ImqsCrud.
+	// The ping route /crud/ping also fails intermittently, so we add this retry mechanism and log to try and
+	// determine where the problem lies.
+	var backend *backendConnection
+	findRetries := 0
+	for {
+		var err error
+		backend, err = s.findBackend(req)
+		if err == nil {
+			break
+		}
+		if findRetries < 5 {
+			s.Log.Errorf("Error retrieving httpbridge backend conn for port %v: %v\n", s.BackendPort, err)
+			findRetries++
+			time.Sleep(time.Second*2)
+		} else {
+			http.Error(w, err.Error(), http.StatusGatewayTimeout)
+			return
+		}
 	}
 
 	// This is not true under HTTP/2. I haven't bothered yet to try and determine the channel correctly.
