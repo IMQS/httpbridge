@@ -19,6 +19,8 @@ const (
 	baseUrl           = "http://" + serverFrontPort
 )
 
+const BodyDontCare = "<ANYTHING>"
+
 var cpp_server *exec.Cmd
 var cpp_server_out *bytes.Buffer
 var cpp_server_err *bytes.Buffer
@@ -172,17 +174,77 @@ func restart(t *testing.T) {
 	}
 }
 
-func doRequest(t *testing.T, method string, url string, body string) *http.Response {
+// A wrapped reader that reads in predictable chunks.
+// Interval between chunks is predictable.
+// Max size of each chunk is predictable.
+type slowReader struct {
+	raw           io.Reader
+	lastTime      time.Time
+	chunkMaxSize  int
+	chunkInterval time.Duration
+	totalRead     int
+}
+
+type slowReaderFull struct {
+	slowReader
+}
+
+func (s *slowReader) Read(p []byte) (int, error) {
+	sleep_for := s.lastTime.Add(s.chunkInterval).Sub(time.Now())
+	if sleep_for > 0 {
+		time.Sleep(sleep_for)
+	}
+	start := time.Now()
+	maxRead := len(p)
+	if s.chunkMaxSize < maxRead {
+		maxRead = s.chunkMaxSize
+	}
+	buf := make([]byte, maxRead)
+	n, err := s.raw.Read(buf)
+	s.totalRead += n
+	copy(p, buf[:n])
+	if err == nil {
+		s.lastTime = start
+		fmt.Printf("Slow sending %v bytes (total = %v)\n", n, s.totalRead)
+	} else {
+		fmt.Printf("Error slow sending %v\n", err)
+	}
+	return n, err
+}
+
+func newSlowReader(raw io.Reader, intervalTime time.Duration, bytesPerSecond int) *slowReader {
+	return &slowReader{
+		raw:           raw,
+		lastTime:      time.Now(),
+		chunkMaxSize:  bytesPerSecond,
+		chunkInterval: intervalTime,
+	}
+}
+
+// Wraps a buffer in a dumb reader, that provides ONLY the Read() interface
+// This prevents the Go http runtime from figuring out the content length,
+// so it transmits the request chunked.
+type dumbReader struct {
+	raw io.Reader
+}
+
+func (r *dumbReader) Read(p []byte) (int, error) {
+	return r.raw.Read(p)
+}
+
+// In order to get a chunked request, set bodyLen = -1. In addition, you must use an io.Reader
+// that doesn't support seeking, so that the Go http runtime can't figure out the length
+// of the stream. Our slowReader is just such an io.Reader.
+func doRequest(t *testing.T, method string, url string, bodyLen int, body io.Reader) *http.Response {
 	if *verbose_http {
 		fmt.Printf("%v %v\n", method, url)
 	}
-	var bodyReader io.Reader
-	if method == "POST" || method == "PUT" {
-		bodyReader = bytes.NewReader([]byte(body))
-	}
-	req, err := http.NewRequest(method, baseUrl+url, bodyReader)
+	req, err := http.NewRequest(method, baseUrl+url, body)
 	if err != nil {
 		t.Fatalf("%v: Error creating request: %v", url, err)
+	}
+	if bodyLen != -1 && body != nil {
+		req.ContentLength = int64(bodyLen)
 	}
 	resp, err := requestClient.Do(req)
 	if err != nil {
@@ -191,8 +253,8 @@ func doRequest(t *testing.T, method string, url string, body string) *http.Respo
 	return resp
 }
 
-func testRequest(t *testing.T, method string, url string, body string, expectCode int, expectBody string) {
-	resp := doRequest(t, method, url, body)
+func testRequest(t *testing.T, method string, url string, bodyLen int, body io.Reader, expectCode int, expectBody string) {
+	resp := doRequest(t, method, url, bodyLen, body)
 	defer resp.Body.Close()
 	respBodyB, err := ioutil.ReadAll(resp.Body)
 	respBody := string(respBodyB)
@@ -202,17 +264,21 @@ func testRequest(t *testing.T, method string, url string, body string, expectCod
 	if resp.StatusCode != expectCode {
 		t.Errorf("%v:\nexpected code (%v)\nreceived code (%v)", url, expectCode, resp.StatusCode)
 	}
-	if respBody != expectBody {
+	if expectBody != BodyDontCare && respBody != expectBody {
 		t.Errorf("%v:\nexpected (%v)\nreceived (%v)", url, expectBody, respBody)
 	}
 }
 
 func testPost(t *testing.T, url string, body string, expectCode int, expectBody string) {
-	testRequest(t, "POST", url, body, expectCode, expectBody)
+	testRequest(t, "POST", url, len(body), bytes.NewReader([]byte(body)), expectCode, expectBody)
+}
+
+func testPostBodyReader(t *testing.T, url string, bodyLen int, body io.Reader, expectCode int, expectBody string) {
+	testRequest(t, "POST", url, bodyLen, body, expectCode, expectBody)
 }
 
 func testGet(t *testing.T, url string, expectCode int, expectBody string) {
-	testRequest(t, "GET", url, "", expectCode, expectBody)
+	testRequest(t, "GET", url, 0, nil, expectCode, expectBody)
 }
 
 func generateBuf(numBytes int) string {
@@ -258,8 +324,8 @@ func TestHelloWorld(t *testing.T) {
 func TestEcho(t *testing.T) {
 	restart(t)
 	withCombinations(t, func() {
-		for chunked := 0; chunked < 2; chunked++ {
-			maxResponseSize := chunked * 4000
+		for singleResponseFrame := 0; singleResponseFrame < 2; singleResponseFrame++ {
+			maxResponseSize := singleResponseFrame * 4000 // 0 = disabled (ie no limit on frame size)
 			url := fmt.Sprintf("/echo?MaxTransmitBodyChunkSize=%v", maxResponseSize)
 
 			testPost(t, url, "Hello!", 200, "Hello!")
@@ -271,6 +337,68 @@ func TestEcho(t *testing.T) {
 			testPost(t, url, bigBuf, 200, bigBuf)
 		}
 	})
+}
+
+func TestChunkedRequest(t *testing.T) {
+	restart(t)
+	buf := generateBuf(3 * 1024 * 1024)
+	testPostBodyReader(t, "/echo", -1, &dumbReader{bytes.NewReader([]byte(buf))}, 200, buf)
+}
+
+func TestTooLongURI(t *testing.T) {
+	restart(t)
+	url := "/" + generateBuf(65537)
+	testGet(t, url, 414, "")
+}
+
+func TestServerOutOfMemory_Early(t *testing.T) {
+	restart(t)
+
+	// This tests an early path in the C++ code, where it rejects the message
+	// before receiving the body for it.
+	testGet(t, "/control?MaxWaitingBufferTotal=5", 200, "")
+	testPost(t, "/echo", generateBuf(100), 503, "")
+}
+
+func TestServerOutOfMemory_Late(t *testing.T) {
+	restart(t)
+
+	// This tests a late path in the C++ code, where it's busy trying to
+	// buffer up a body frame, and only then does it notice that it would
+	// exceed it's quota. This is not a typical scenario, because it implies
+	// changing the quota after bootup. However, it IS an error path in
+	// the code, so we should check it.
+	// Additionally, this also happens to stress the ABORT path from
+	// backend to server, where it aborts an upload in progress.
+
+	// The combination of timings here is crucial, because the Go http client
+	// seems to buffer up request data until we hit around 5 KB of data,
+	// before it starts sending the request. We need our backend to receive
+	// that initial header frame, and mark the request as buffered, so that
+	// we can trigger the code path that we're looking for.
+	const bytesPerChunk = 1000
+	const sleepTime = 1 * time.Second
+
+	// Start a slow upload
+	testGet(t, "/control?MaxWaitingBufferTotal=1000000", 200, "")
+	body := generateBuf(10 * 1024 * 1024)
+	slow := newSlowReader(bytes.NewReader([]byte(body)), 100*time.Millisecond, bytesPerChunk)
+	wait := make(chan bool)
+	go func() {
+		fmt.Printf("Start slow sending\n")
+		testPostBodyReader(t, "/echo", len(body), slow, 503, BodyDontCare)
+		fmt.Printf("Done slow sending\n")
+		wait <- true
+	}()
+
+	// Give the slow /echo send some time to get going before bringing the limit back down
+	// Note that the timing here is crucial. See the comment above the timings constants.
+	time.Sleep(sleepTime)
+
+	fmt.Printf("Reducing time\n")
+	testGet(t, "/control?MaxWaitingBufferTotal=1", 200, "")
+	fmt.Printf("Done reducing time\n")
+	<-wait
 }
 
 func TestTimeout(t *testing.T) {

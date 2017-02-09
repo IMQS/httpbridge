@@ -215,6 +215,34 @@ void TestRequestQuerySplitter()
 	}
 }
 
+void TestResponseMisc()
+{
+	hb::Response r;
+	assert(r.HeaderCount() == 0);
+	r.AddHeader("abc", "1234");
+	assert(r.HeaderCount() == 1);
+	assert(streq(r.HeaderByName("abc"), "1234"));
+	assert(r.HasHeader("abc"));
+	int32_t keyLen = 0;
+	int32_t valLen = 0;
+	const char* key = nullptr;
+	const char* val = nullptr;
+	r.HeaderAt(0, keyLen, key, valLen, val);
+	assert(keyLen == 3);
+	assert(valLen == 4);
+	assert(streq(key, "abc"));
+	assert(streq(val, "1234"));
+
+	// out of range
+	r.HeaderAt(1, keyLen, key, valLen, val);
+	assert(key == nullptr);
+	assert(val == nullptr);
+	assert(keyLen == 0);
+	assert(valLen == 0);
+	assert(r.HeaderByName("a") == nullptr);
+	assert(!r.HasHeader("a"));
+}
+
 void TestUtilFunctions()
 {
 	char buf[100];
@@ -235,6 +263,7 @@ int main(int argc, char** argv)
 {
 	run(TestUrlQueryParser);
 	run(TestRequestQuerySplitter);
+	run(TestResponseMisc);
 	run(TestUtilFunctions);
 	return 0;
 }

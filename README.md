@@ -144,3 +144,10 @@ multiple threads. The exact list of functions that are safe to call from multipl
 connected to the client browser doesn't want any more data yet. This would require a new kind of frame
 that gets sent from server to backend. At present, I suspect we're in very bad territory here for large
 file transmissions.
+* Add a test where a long upload is in progress, and the client disconnects, leaving the backend
+to handle an ABORT frame.
+* Add a test where a backend is transmitting a large response body, and the client disconnects,
+leaving the backend to handle an ABORT frame.
+* Add a test where a backend is transmitting a large response body, and the backend decides
+to stop, so it sends an ABORT frame to the server.
+* We already have a test where the backend aborts a long upload. This is TestServerOutOfMemory_Late

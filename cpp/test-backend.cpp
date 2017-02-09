@@ -1,6 +1,6 @@
 //######################################################
 //
-// This is used by unit tests
+// This is used by unit tests (ie spawned by Go tests)
 //
 //######################################################
 #include "http-bridge.h"
@@ -145,8 +145,11 @@ private:
 	void HttpControl(hb::InFrame& inframe, LocalRequest* lr)
 	{
 		const auto& buffer_max = inframe.Request->Query("MaxAutoBufferSize");
+		const auto& waiting_buffer_max = inframe.Request->Query("MaxWaitingBufferTotal");
 		if (buffer_max != nullptr)
 			Backend->MaxAutoBufferSize = atoi(buffer_max);
+		if (waiting_buffer_max != nullptr) 
+			Backend->MaxWaitingBufferTotal = atoi(waiting_buffer_max);
 		Backend->Send(inframe.Request, hb::Status200_OK);
 	}
 
@@ -245,7 +248,9 @@ int main(int argc, char** argv)
 {
 	hb::Startup();
 	
+	hb::Logger stdlog;
 	hb::Backend backend;
+	backend.Log = &stdlog;
 	Server server;
 	server.Backend = &backend;
 	server.StartThreads();

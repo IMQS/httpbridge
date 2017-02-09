@@ -177,6 +177,7 @@ HTTPBRIDGE_API HTTPBRIDGE_NORETURN_PREFIX void BuiltinTrap() HTTPBRIDGE_NORETURN
 		Status510_Not_Extended = 510,
 		Status511_Network_Authentication_Required = 511,
 		StatusMeta_BodyPart = 1000,	// Used in a Response message to indicate that this is a body part that is being transmitted
+		Status000_NULL = 0,			// Used where a NULL value is required
 	};
 
 	extern const char* Header_Content_Length;
@@ -197,6 +198,7 @@ HTTPBRIDGE_API HTTPBRIDGE_NORETURN_PREFIX void BuiltinTrap() HTTPBRIDGE_NORETURN
 	HTTPBRIDGE_API int			U64toa(uint64_t v, char* buf, size_t bufSize);
 	HTTPBRIDGE_API uint64_t		uatoi64(const char* s, size_t len);
 	HTTPBRIDGE_API uint64_t		uatoi64(const char* s);
+	HTTPBRIDGE_API int64_t		atoi64(const char* s);
 	HTTPBRIDGE_API int			TranslateVersionToFlatBuffer(hb::HttpVersion v);
 
 	class HTTPBRIDGE_API Logger
@@ -429,7 +431,9 @@ namespace hb
 	class HTTPBRIDGE_API Backend
 	{
 	public:
-		Logger*				Log = nullptr;								// This is not owned by Backend. Backend will never delete this. Do not change this after Connect() has been called.
+		// Log is not owned by Backend (ie Backend will never delete Log).
+		// Do not change this after Connect() has been called.
+		Logger*				Log = nullptr;
 		
 		// Maximum number of bytes that will be allocated for 'ResendWhenBodyIsDone' requests. Total shared by all pending requests.
 		std::atomic<size_t>	MaxWaitingBufferTotal;
@@ -459,9 +463,25 @@ namespace hb
 		enum FrameStatus
 		{
 			FrameOK,
-			FrameInvalid,
+			FrameStreamNotFound,
 			FrameOutOfMemory,
 			FrameURITooLong,
+			FrameBodyLongerThanContentLength,
+		};
+		// InternalRecvResult is guaranteed to be a strict super set of RecvResult.
+		// The reason we keep these separate is to avoid confusing the user with enums
+		// that they don't need to worry about.
+		enum class InternalRecvResult
+		{
+			NoData = RecvResult_NoData,
+			Data = RecvResult_Data,
+			Closed = RecvResult_Closed,
+			BadFrame,
+		};
+		struct InternalRecvResponse
+		{
+			InternalRecvResult	Result;
+			StatusCode			Status;
 		};
 		static const uint64_t ResponseBodyUninitialized = -1;
 		struct RequestState
@@ -485,18 +505,18 @@ namespace hb
 
 		std::atomic<size_t>	BufferedRequestsTotalBytes;		// Total number of body bytes allocated for "BufferedRequests"
 
-		RecvResult			RecvInternal(InFrame& inframe);
-		void				RequestFinished(const StreamKey& key);
-		bool				Connect(ITransport* transport, const char* addr);
-		FrameStatus			UnpackHeader(const httpbridge::TxFrame* txframe, InFrame& inframe);
-		FrameStatus			UnpackBody(const httpbridge::TxFrame* txframe, InFrame& inframe);
-		size_t				TotalHeaderBlockSize(const httpbridge::TxFrame* frame);
-		void				LogAndPanic(const char* msg);
-		void				SendResponse(RequestPtr request, StatusCode status);
-		void				SendResponse(uint64_t channel, uint64_t stream, StatusCode status);
-		RequestState*		GetRequestOrDie(uint64_t channel, uint64_t stream);
-		static StreamKey	MakeStreamKey(uint64_t channel, uint64_t stream);
-		static StreamKey	MakeStreamKey(ConstRequestPtr request);
+		InternalRecvResponse	RecvInternal(InFrame& inframe);
+		void					RequestFinished(const StreamKey& key);
+		bool					Connect(ITransport* transport, const char* addr);
+		FrameStatus				UnpackHeader(const httpbridge::TxFrame* txframe, InFrame& inframe);
+		FrameStatus				UnpackBody(const httpbridge::TxFrame* txframe, InFrame& inframe);
+		size_t					TotalHeaderBlockSize(const httpbridge::TxFrame* frame);
+		void					LogAndPanic(const char* msg);
+		void					SendResponse(RequestPtr request, StatusCode status);
+		void					SendResponse(uint64_t channel, uint64_t stream, StatusCode status);
+		RequestState*			GetRequestOrDie(uint64_t channel, uint64_t stream);
+		static StreamKey		MakeStreamKey(uint64_t channel, uint64_t stream);
+		static StreamKey		MakeStreamKey(ConstRequestPtr request);
 	};
 
 	/* HTTP request
@@ -537,8 +557,15 @@ namespace hb
 		HttpVersion				Version = HttpVersion10;
 		uint64_t				Channel = 0;
 		uint64_t				Stream = 0;
-		uint64_t				BodyLength = 0;			// The total length of the body of this request. This is simply a cache of the Content-Length header.
-		hb::Buffer				BodyBuffer;				// If IsBuffered = true, then BodyBuffer stores the entire body
+		
+		// The total length of the body of this request.
+		// If the Content-Length header is given, then this is a cache of that value.
+		// If this is a chunked upload, then ContentLength is -1, and the final frame
+		// will be marked with IsLast = true.
+		uint64_t				ContentLength = 0;
+		
+		// If IsBuffered = true, then BodyBuffer stores the entire body
+		hb::Buffer				BodyBuffer;
 		
 								Request();
 								~Request();
@@ -599,7 +626,7 @@ namespace hb
 	{
 	public:
 		RequestPtr		Request;
-		bool			IsHeader;			// Is this the first frame of the request? Note that IsHeader and IsLast are both true for a request with an empty body.
+		bool			IsHeader;			// Is this the first frame of the request? For a request with an empty body, IsHeader and IsLast are both true.
 		bool			IsLast;				// Is this the last frame of the request?
 		bool			IsAborted;			// True if the stream has been aborted (ie the browser connection timed out, etc). Such a frame contains no data, and IsLast is false.
 
@@ -626,6 +653,9 @@ namespace hb
 	which does AddHeader("Content-Length", ...)). If you don't do that, then httpbridge will assume that the body
 	of your response consists solely of what is present in the first response frame.
 
+	To send a chunked response, set Content-Length to -1 (eg using AddHeader_ContentLength(-1)).
+	Then, on your last frame, set IsFinalChunkedFrame = true.
+
 	A Response is either one of these two things:
 	1. A Header response, which must be the first response frame sent on a stream. A header response can optionally contain part, or all, of the response body.
 	2. A BodyPart response, which may not contain any headers, and is strictly just a chunk of bytes that
@@ -641,6 +671,7 @@ namespace hb
 		uint64_t			Channel = 0;
 		uint64_t			Stream = 0;
 		StatusCode			Status = Status200_OK;
+		bool				IsFinalChunkedFrame = false;
 
 		Response();
 		Response(ConstRequestPtr request, StatusCode status = Status200_OK);
@@ -688,7 +719,7 @@ namespace hb
 		ByteVectorOffset					BodyOffset = 0;
 		uint32_t							BodyLength = 0;
 		bool								IsFlatBufferBuilt = false;
-
+		
 		// Our header keys and values are always null terminated. This is necessary in order
 		// to provide a consistent API between Request and Response objects.
 		Vector<uint32_t>					HeaderIndex;

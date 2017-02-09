@@ -335,6 +335,17 @@ namespace hb
 		return v;
 	}
 
+	int64_t atoi64(const char* s)
+	{
+		int64_t v = 0;
+		size_t i = s[0] == '-' ? 1 : 0;
+		for (; s[i]; i++)
+			v = v * 10 + (s[i] - '0');
+		if (s[0] == '-')
+			v = -v;
+		return v;
+	}
+
 #ifdef HTTPBRIDGE_PLATFORM_WINDOWS
 	void SleepNano(int64_t nanoseconds)
 	{
@@ -995,8 +1006,8 @@ namespace hb
 			const char* contentLen = response.HeaderByName("Content-Length");
 			if (contentLen != nullptr)
 			{
-				// If you set Content-Length, then that is the expected length of the response.
-				rs->ResponseBodyRemaining = uatoi64(contentLen);
+				// If you set Content-Length, then that is the expected length of the response, unless it's -1, in which case it's chunked.
+				rs->ResponseBodyRemaining = (uint64_t) atoi64(contentLen);
 			}
 			else
 			{
@@ -1011,7 +1022,7 @@ namespace hb
 		rs->ResponseBodyRemaining -= response.BodyBytes();
 		CurrentRequestLock.unlock();
 
-		bool isLast = rs->ResponseBodyRemaining == 0;
+		bool isLast = rs->ResponseBodyRemaining == 0 || response.IsFinalChunkedFrame;
 		if (isLast)
 		{
 			RequestFinished(MakeStreamKey(rs->Request));
@@ -1065,23 +1076,31 @@ namespace hb
 		if (std::this_thread::get_id() != ThreadId)
 			LogAndPanic("Recv() called from a different thread than the one that called Connect()");
 
-		RecvResult res = RecvInternal(frame);
-		if (res != RecvResult_Data)
+		InternalRecvResponse res = RecvInternal(frame);
+		if (res.Result == InternalRecvResult::BadFrame)
+		{
+			// Something went wrong inside httpbridge, such as out of memory, or URI too long.
+			// Send a response to the server immediately, and do not inform the httpbridge user.
+			StreamKey streamKey = MakeStreamKey(frame.Request);
+			CurrentRequestLock.lock();
+			CurrentRequests[streamKey] = {frame.Request, ResponseBodyUninitialized, false};
+			CurrentRequestLock.unlock();
+			SendResponse(streamKey.Channel, streamKey.Stream, res.Status);
 			return false;
+		}
 
+		if (res.Result != InternalRecvResult::Data)
+			return false;
+		
 		StreamKey streamKey = MakeStreamKey(frame.Request);
 
 		if (frame.IsHeader)
 		{
-			RequestState rs;
-			rs.Request = frame.Request;
-			rs.ResponseBodyRemaining = ResponseBodyUninitialized;
-			rs.IsResponseHeaderSent = false;
 			CurrentRequestLock.lock();
-			CurrentRequests[streamKey] = rs;
+			CurrentRequests[streamKey] = {frame.Request, ResponseBodyUninitialized, false};
 			CurrentRequestLock.unlock();
 
-			if (frame.Request->BodyLength == 0)
+			if (frame.Request->ContentLength == 0)
 			{
 				HTTPBRIDGE_ASSERT(frame.IsLast);
 				frame.Request->IsBuffered = true;
@@ -1092,7 +1111,7 @@ namespace hb
 				return true;
 			}
 
-			if (frame.Request->BodyLength <= MaxAutoBufferSize)
+			if (frame.Request->ContentLength != -1 && frame.Request->ContentLength <= MaxAutoBufferSize)
 			{
 				// Automatically place requests into the 'ResendWhenBodyIsDone' queue
 				if (ResendWhenBodyIsDone(frame))
@@ -1111,8 +1130,8 @@ namespace hb
 	{
 		RequestPtr request = frame.Request;
 
-		if (!frame.IsHeader || frame.IsLast || request->BodyLength == 0)
-			LogAndPanic("ResendWhenBodyIsDone may only be called on the first frame of a request (the header frame), with a non-zero body length");
+		if (!frame.IsHeader || frame.IsLast || request->ContentLength == 0 || request->ContentLength == -1)
+			LogAndPanic("ResendWhenBodyIsDone may only be called on the first frame of a request (the header frame), with a positive body length");
 
 		CurrentRequestLock.lock();
 		StreamKey key = MakeStreamKey(request);
@@ -1120,13 +1139,13 @@ namespace hb
 			LogAndPanic("ResendWhenBodyIsDone called on an unknown request");
 		CurrentRequestLock.unlock();
 
-		size_t initialSize = min(InitialBufferSize.load(), (size_t) request->BodyLength);
+		size_t initialSize = min(InitialBufferSize.load(), (size_t) request->ContentLength);
 		initialSize = max(initialSize, frame.BodyBytesLen);
 		initialSize = max(initialSize, (size_t) 16);
 
 		if (initialSize + (uint64_t) BufferedRequestsTotalBytes > (uint64_t) MaxWaitingBufferTotal)
 		{
-			AnyLog()->Log("MaxWaitingBufferTotal exceeded");
+			AnyLog()->Log("MaxWaitingBufferTotal exceeded during ResendWhenBodyIsDone");
 			SendResponse(request, Status503_Service_Unavailable);
 			return false;
 		}
@@ -1173,10 +1192,10 @@ namespace hb
 	// TODO: Experiment with reading exactly one frame at a time. First read 4 bytes for the frame length, and thereafter read only
 	// exactly as much as is necessary for that single frame. Then we don't need to do a memmove, and things become simpler.
 	// See if that really produces faster results for average workloads.
-	RecvResult Backend::RecvInternal(InFrame& inframe)
+	Backend::InternalRecvResponse Backend::RecvInternal(InFrame& inframe)
 	{
 		if (Transport == nullptr)
-			return RecvResult_Closed;
+			return {InternalRecvResult::Closed, Status000_NULL};
 
 		const size_t maxRecv = 65536;
 		const size_t maxBufSize = 1024*1024;
@@ -1186,7 +1205,7 @@ namespace hb
 		{
 			AnyLog()->Logf("Server is trying to send us a frame larger than %d bytes. Closing connection.", (int) maxBufSize);
 			Close();
-			return RecvResult_Closed;
+			return {InternalRecvResult::Closed, Status000_NULL};
 		}
 
 		// If we don't have at least one frame ready, then read more
@@ -1198,7 +1217,7 @@ namespace hb
 			{
 				AnyLog()->Logf("Server closed connection");
 				Close();
-				return result;
+				return {(InternalRecvResult) result, Status000_NULL};
 			}
 			RecvBuf.Count += read;
 		}
@@ -1236,27 +1255,42 @@ namespace hb
 				{
 					AnyLog()->Logf("Unrecognized frame type %d. Closing connection.", (int) txframe->frametype());
 					Close();
-					return RecvResult_Closed;
+					return {InternalRecvResult::Closed, Status000_NULL};
 				}
 				RecvBuf.EraseFromStart(4 + frameSize);
 				if (headStatus != FrameOK || bodyStatus != FrameOK)
 				{
 					if (headStatus == FrameURITooLong)
 					{
-						SendResponse(txframe->channel(), txframe->stream(), Status414_URI_Too_Long);
+						return {InternalRecvResult::BadFrame, Status414_URI_Too_Long};
 					}
 					else if (headStatus == FrameOutOfMemory || bodyStatus == FrameOutOfMemory)
 					{
-						SendResponse(txframe->channel(), txframe->stream(), Status503_Service_Unavailable);
+						return {InternalRecvResult::BadFrame, Status503_Service_Unavailable};
 					}
-					inframe.Reset();
-					return RecvResult_NoData;
+					else if (bodyStatus == FrameBodyLongerThanContentLength)
+					{
+						return {InternalRecvResult::BadFrame, Status400_Bad_Request};
+					}
+					else if (bodyStatus == FrameStreamNotFound)
+					{
+						// The only time we expect to receive FrameStreamNotFound, is when we have already
+						// terminated a stream, but the client is still trying to send us data on that stream.
+						// Since we have already sent a termination response, there is nothing further that
+						// we can do, except for ignore the incoming stream data.
+						inframe.Reset();
+						return {InternalRecvResult::NoData, Status000_NULL};
+					}
+					else
+					{
+						HTTPBRIDGE_PANIC("Unexpected invalid frame state");
+					}
 				}
-				return RecvResult_Data;
+				return {InternalRecvResult::Data, Status000_NULL};
 			}
 		}
 
-		return RecvResult_NoData;
+		return {InternalRecvResult::NoData, Status000_NULL};
 	}
 
 	Backend::FrameStatus Backend::UnpackHeader(const httpbridge::TxFrame* txframe, InFrame& inframe)
@@ -1320,7 +1354,7 @@ namespace hb
 					bodySize = txframe->body()->size();
 				AnyLog()->Logf("Received body bytes for unknown stream [%llu:%llu] (%d body bytes)", txframe->channel(), txframe->stream(), (int) bodySize);
 				CurrentRequestLock.unlock();
-				return FrameInvalid;
+				return FrameStreamNotFound;
 			}
 			inframe.Request = cr->second.Request;
 			CurrentRequestLock.unlock();
@@ -1332,21 +1366,23 @@ namespace hb
 
 		if (inframe.Request->IsBuffered)
 		{
+			HTTPBRIDGE_ASSERT(inframe.Request->ContentLength != -1);
 			Buffer& buf = inframe.Request->BodyBuffer;
-			if (buf.Count + inframe.BodyBytesLen > inframe.Request->BodyLength)
+			if (buf.Count + inframe.BodyBytesLen > inframe.Request->ContentLength)
 			{
-				AnyLog()->Logf("Request sent too many body bytes. Ignoring frame [%llu:%llu]", txframe->channel(), txframe->stream());
-				return FrameInvalid;
+				AnyLog()->Logf("Request sent too many body bytes. Ignoring frame [%llu:%llu] and aborting stream", txframe->channel(), txframe->stream());
+				return FrameBodyLongerThanContentLength;
 			}
+			// Check to see if we're going to exceed MaxWaitingBufferTotal.
 			// Assume that a buffer realloc is going to grow by buf.Capacity (ie 2x growth).
 			if (buf.Count + txframe->body()->size() > buf.Capacity && BufferedRequestsTotalBytes + buf.Capacity > MaxWaitingBufferTotal)
 			{
-				// TODO: same as below - terminate the stream
+				AnyLog()->Logf("MaxWaitingBufferTotal exceeded when receiving frame [%llu:%llu]", txframe->channel(), txframe->stream());
+				return FrameOutOfMemory;
 			}
 			auto oldBufCapacity = buf.Capacity;
 			if (!buf.TryWrite(txframe->body()->Data(), txframe->body()->size()))
 			{
-				// TODO: figure out a way to terminate the stream right here, with a 503 response
 				AnyLog()->Logf("Failed to allocate memory for body frame [%llu:%llu]", txframe->channel(), txframe->stream());
 				return FrameOutOfMemory;
 			}
@@ -1608,7 +1644,7 @@ namespace hb
 		_HeaderBlock = (const uint8_t*) headerBlock;
 		const char* contentLength = HeaderByName(Header_Content_Length);
 		if (contentLength != nullptr)
-			BodyLength = (uint64_t) uatoi64(contentLength);
+			ContentLength = (uint64_t) atoi64(contentLength);
 	}
 
 	ConstString Request::Method() const
@@ -1922,7 +1958,10 @@ namespace hb
 	void Response::AddHeader_ContentLength(uint64_t contentLength)
 	{
 		char buf[21];
-		u64toa(contentLength, buf);
+		if (contentLength == -1)
+			memcpy(buf, "-1", 3);
+		else
+			u64toa(contentLength, buf);
 		AddHeader(Header_Content_Length, buf);
 	}
 
@@ -1980,7 +2019,7 @@ namespace hb
 
 	void Response::HeaderAt(int32_t index, int32_t& keyLen, const char*& key, int32_t& valLen, const char*& val) const
 	{
-		if (index > HeaderCount())
+		if (index >= HeaderCount())
 		{
 			keyLen = 0;
 			valLen = 0;
@@ -2172,7 +2211,7 @@ namespace hb
 		uint32_t i = _i;
 		i <<= 1;
 		uint32_t top;
-		if (i + 3 >= (uint32_t) HeaderIndex.Size())
+		if (i + 2 > (uint32_t) HeaderIndex.Size())
 			return 0;
 
 		if (i + 2 == HeaderIndex.Size())

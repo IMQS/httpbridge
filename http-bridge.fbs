@@ -2,10 +2,13 @@ namespace httpbridge;
 
 // Header frames always contain the entire header. They may also contain body data.
 // Body frames only contain body data, as well as 'channel' and 'stream'.
+// Pause and Continue frames contain nothing except for the channel and stream.
 enum TxFrameType : byte {
 	Header = 0,
 	Body,
-	Abort
+	Abort,
+	Pause,				// Sent from server to backend, to indicate backpressure. Pause transmission of response on this stream.
+	Continue			// Sent from server to backend, to unpause response transmission.
 }
 
 enum TxHttpVersion : byte {
@@ -42,6 +45,8 @@ table TxFrame {
 	// Request example:		GET /the/path?a=b
 	// Response example:	200 [value is not used]
 	// The remaining header lines are the proper HTTP headers
+	// Content-Length is special. If it is -1, then the transfer is chunked.
+	// Chunked transfers are finished when a frame with the Final flag is received.
 	headers:			[TxHeaderLine];
 
 	body:				[ubyte];					// A portion of the body (or perhaps the entire thing, if short enough)
