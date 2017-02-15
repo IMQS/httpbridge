@@ -78,6 +78,7 @@ Build {
 		CXXOPTS = {
 			{ "/W3"; Config = "win*" },
 			{ "/EHsc"; Config = "win*" },
+			{ "-O1"; Config = { "*-gcc-*-release", "*-clang-*-release" } },
 			{ "/O2"; Config = "*-msvc-release" },
 			{ "/analyze"; Config = "*-msvc-release" },
 			{ "-std=c++11"; Config = {"*-gcc-*", "*-clang-*"} },

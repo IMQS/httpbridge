@@ -502,7 +502,7 @@ func testThroughputWith(t *testing.T, numConnections int, averageAggregateBytesP
 
 	// You must make the minimum size quite large, like 2MB, otherwise the TCP receive buffer
 	// of the HTTP client just eats it all up, and you don't end up with blocking buffers on the send side.
-	minSize := 2 * meg
+	minSize := tcpBufferSize
 
 	fmt.Printf("Theoretical speed: %v MB/s\n", (numSlow*slowSpeed+(numConnections-numSlow)*fastSpeed)/meg)
 	fmt.Printf("Slow speed: %v KB/s\n", slowSpeed/1024)

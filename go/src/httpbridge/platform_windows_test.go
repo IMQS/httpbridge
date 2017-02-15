@@ -6,6 +6,8 @@ var cpp_test_build []string
 
 const cpp_test_bin = "test-backend.exe"
 
+const tcpBufferSize = 2 * 1024 * 1024
+
 func init() {
 	// O2 is necessary to get good throughput for performance tests
 	root := "../../../"
