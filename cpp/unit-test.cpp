@@ -213,6 +213,15 @@ void TestRequestQuerySplitter()
 		expect_fail(buf);
 		free(buf);
 	}
+
+	{
+		hb::Request r;
+		hb::Backend back;
+		SetupRequest(r, back, "?x=1122334455667788&y=1.5");
+		assert(r.ParseURI());
+		assert(r.QueryInt64("x") == (int64_t) 1122334455667788ll);
+		assert(r.QueryDouble("y") == 1.5);
+	}
 }
 
 void TestResponseMisc()

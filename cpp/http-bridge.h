@@ -18,14 +18,7 @@
 
 TODO
 1. Support more advanced features of HTTP/2 such as PUSH frames.
-2. Figure out in which conditions a request will have a body but no Content-Length header. Right now
-	we're a bit ambivalent on this one, for example we copy Content-Length into Request.BodyLength,
-	but then we rely on the Server to send us a flag indicating that a frame is Final.
 
-------------------------------------------------------------------------------------------------
-
-c:\dev\head\otaku\t2-output\win64-2013-debug-default\flatc -c -o cpp -b http-bridge.fbs
-c:\dev\head\otaku\t2-output\win64-2013-debug-default\flatc -g -o go/src -b http-bridge.fbs
 */
 
 #include <stdint.h>
@@ -91,6 +84,9 @@ HTTPBRIDGE_API HTTPBRIDGE_NORETURN_PREFIX void BuiltinTrap() HTTPBRIDGE_NORETURN
 	typedef std::shared_ptr<Request>		RequestPtr;
 	typedef std::shared_ptr<const Request>	ConstRequestPtr;
 
+	// This dword appears before every frame. It is followed by 4 bytes of frame size, and then the flatbuffer.
+	const uint32_t MagicFrameMarker = 0x48426268; // "HBbh"
+
 	enum SendResult
 	{
 		SendResult_All,			// All of the data was sent
@@ -110,6 +106,21 @@ HTTPBRIDGE_API HTTPBRIDGE_NORETURN_PREFIX void BuiltinTrap() HTTPBRIDGE_NORETURN
 		HttpVersion10,
 		HttpVersion11,
 		HttpVersion2,
+	};
+
+	enum class FrameType
+	{
+		Data,		// Header and/or Body data
+		Abort,		// Abort stream
+		Pause,		// Pause transmission of response
+		Resume,		// Resume transmission of response
+	};
+
+	enum class StreamState : uint32_t
+	{
+		Active,		// The stream is in it's normal state; Receiving a request, or sending a response.
+		Aborted,	// The stream has been aborted. Do not send any more frames.
+		Paused,		// The stream has been paused. Wait until the stream is Active again before sending any more frames. TCP buffer from server -> client is full.
 	};
 
 	enum StatusCode
@@ -460,22 +471,22 @@ namespace hb
 		Logger*				AnyLog();
 
 	private:
-		enum FrameStatus
+		enum class FrameStatus
 		{
-			FrameOK,
-			FrameStreamNotFound,
-			FrameOutOfMemory,
-			FrameURITooLong,
-			FrameBodyLongerThanContentLength,
+			OK,
+			StreamNotFound,
+			OutOfMemory,
+			URITooLong,
+			BodyLongerThanContentLength,
 		};
 		// InternalRecvResult is guaranteed to be a strict super set of RecvResult.
 		// The reason we keep these separate is to avoid confusing the user with enums
 		// that they don't need to worry about.
 		enum class InternalRecvResult
 		{
-			NoData = RecvResult_NoData,
-			Data = RecvResult_Data,
-			Closed = RecvResult_Closed,
+			NoData	= RecvResult_NoData,
+			Data	= RecvResult_Data,
+			Closed	= RecvResult_Closed,
 			BadFrame,
 		};
 		struct InternalRecvResponse
@@ -510,10 +521,12 @@ namespace hb
 		bool					Connect(ITransport* transport, const char* addr);
 		FrameStatus				UnpackHeader(const httpbridge::TxFrame* txframe, InFrame& inframe);
 		FrameStatus				UnpackBody(const httpbridge::TxFrame* txframe, InFrame& inframe);
+		FrameStatus				UnpackControlFrame(const httpbridge::TxFrame* txframe, InFrame& inframe);
 		size_t					TotalHeaderBlockSize(const httpbridge::TxFrame* frame);
 		void					LogAndPanic(const char* msg);
 		void					SendResponse(RequestPtr request, StatusCode status);
 		void					SendResponse(uint64_t channel, uint64_t stream, StatusCode status);
+		RequestState*			GetRequest(uint64_t channel, uint64_t stream);
 		RequestState*			GetRequestOrDie(uint64_t channel, uint64_t stream);
 		static StreamKey		MakeStreamKey(uint64_t channel, uint64_t stream);
 		static StreamKey		MakeStreamKey(ConstRequestPtr request);
@@ -557,7 +570,7 @@ namespace hb
 		HttpVersion				Version = HttpVersion10;
 		uint64_t				Channel = 0;
 		uint64_t				Stream = 0;
-		
+
 		// The total length of the body of this request.
 		// If the Content-Length header is given, then this is a cache of that value.
 		// If this is a chunked upload, then ContentLength is -1, and the final frame
@@ -574,9 +587,12 @@ namespace hb
 		// The header block must have a terminal pair inside in order to make iteration easy.
 		void					Initialize(hb::Backend* backend, HttpVersion version, uint64_t channel, uint64_t stream, int32_t headerCount, const void* headerBlock);
 		
+		StreamState				State() const;								// If State is not Active, then you shouldn't be sending any frames
+		void					SetState(StreamState newState);				// Atomically set the state, but once in Aborted state, always stay Aborted.
+
 		// This is called automatically by Backend. Returns false if an element is too long
 		bool					ParseURI();
-
+		
 		ConstString				Method() const;		// Returns the method, such as GET or POST
 		ConstString				URI() const;		// Returns the raw URI of the request
 
@@ -584,6 +600,8 @@ namespace hb
 
 		ConstString				Query(const char* key) const;		// Returns the first URL query parameter for the given key, or NULL if none found
 		std::string				QueryStr(const char* key) const;	// Returns the first URL query parameter for the given key, or an empty string if none found
+		int64_t  				QueryInt64(const char* key) const;	// Returns the first URL query parameter for the given key, as int64, or 0 if none found
+		double  				QueryDouble(const char* key) const;	// Returns the first URL query parameter for the given key, as int64, or 0 if none found
 
 		// Use NextQuery to iterate over the query parameters.
 		// Returns zero if there are no more items.
@@ -614,21 +632,27 @@ namespace hb
 		void					HeaderAt(int32_t index, const char*& key, const char*& val) const;
 
 	private:
-		static const int		NumPseudoHeaderLines = 1;
-		static const uint16_t	EndOfQueryMarker = 65535;
-		int32_t					_HeaderCount = 0;
-		const uint8_t*			_HeaderBlock = nullptr;		// First HeaderLine[] array and then the headers themselves
-		char*					_CachedURI = nullptr;
+		static const int			NumPseudoHeaderLines = 1;
+		static const uint16_t		EndOfQueryMarker = 65535;
+		int32_t						_HeaderCount = 0;
+		const uint8_t*				_HeaderBlock = nullptr;		// First HeaderLine[] array and then the headers themselves
+		char*						_CachedURI = nullptr;
+		std::atomic<StreamState>	_State;
 	};
 
-	// A frame received from the client
+	/* A frame received from the server
+
+	The first thing to look at in an incoming frame is the Type. If Type is Data, then this
+	frame containers HTTP headers and/or body. If Type is not Data, then this is a control frame
+	which can be one of Abort, Pause, or Resume.
+	*/
 	class HTTPBRIDGE_API InFrame
 	{
 	public:
 		RequestPtr		Request;
+		FrameType		Type;				// Usually you're only interested in Data frames, but you may be interested in the others - ie Abort, Pause, Resume, but those states are also available in Request.
 		bool			IsHeader;			// Is this the first frame of the request? For a request with an empty body, IsHeader and IsLast are both true.
 		bool			IsLast;				// Is this the last frame of the request?
-		bool			IsAborted;			// True if the stream has been aborted (ie the browser connection timed out, etc). Such a frame contains no data, and IsLast is false.
 
 		uint8_t*		BodyBytes;			// Body bytes in this frame
 		size_t			BodyBytesLen;		// Length of BodyBytes

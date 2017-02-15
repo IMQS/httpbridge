@@ -45,7 +45,7 @@ int main(int argc, char** argv)
 			}
 			*/
 
-			if (inframe.IsAborted)
+			if (inframe.Type == hb::FrameType::Abort)
 			{
 				printf("Request aborted\n");
 			}

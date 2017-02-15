@@ -880,9 +880,6 @@ namespace hb
 
 	InFrame::InFrame()
 	{
-		IsHeader = false;
-		IsLast = false;
-		IsAborted = false;
 		Request = nullptr;
 		Reset();
 	}
@@ -903,9 +900,9 @@ namespace hb
 			Request = nullptr;
 		}
 
+		Type = FrameType::Data;
 		IsHeader = false;
 		IsLast = false;
-		IsAborted = false;
 
 		BodyBytes = nullptr;
 		BodyBytesLen = 0;
@@ -989,10 +986,12 @@ namespace hb
 	SendResult Backend::Send(Response& response)
 	{
 		CurrentRequestLock.lock();
-		// TODO: rate limiting. How? Before attempting to send this frame, we return SendResult_BufferFull,
-		// then we wait for the server to tell us that we are clear to send again. This does imply
-		// that the server would also need to tell us when we are not clear to send.
-		RequestState* rs = GetRequestOrDie(response.Channel, response.Stream);
+		RequestState* rs = GetRequest(response.Channel, response.Stream);
+		if (!rs)
+		{
+			CurrentRequestLock.unlock();
+			return SendResult_Closed;
+		}
 		bool isResponseHeader = response.Status != StatusMeta_BodyPart;
 
 		if (!isResponseHeader)
@@ -1111,7 +1110,7 @@ namespace hb
 				return true;
 			}
 
-			if (frame.Request->ContentLength != -1 && frame.Request->ContentLength <= MaxAutoBufferSize)
+			if (frame.Request->ContentLength != -1 && frame.Request->ContentLength <= MaxAutoBufferSize) // from pieter: && !frame.IsLast)
 			{
 				// Automatically place requests into the 'ResendWhenBodyIsDone' queue
 				if (ResendWhenBodyIsDone(frame))
@@ -1189,8 +1188,29 @@ namespace hb
 		CurrentRequestLock.unlock();
 	}
 
-	// TODO: Experiment with reading exactly one frame at a time. First read 4 bytes for the frame length, and thereafter read only
-	// exactly as much as is necessary for that single frame. Then we don't need to do a memmove, and things become simpler.
+	static bool IsControlFrame(httpbridge::TxFrameType type)
+	{
+		return type == httpbridge::TxFrameType_Abort || type == httpbridge::TxFrameType_Pause || type == httpbridge::TxFrameType_Resume;
+	}
+
+	static FrameType FBTypeToFrameType(httpbridge::TxFrameType type)
+	{
+		switch (type)
+		{
+		case httpbridge::TxFrameType_Header:
+		case httpbridge::TxFrameType_Body: return FrameType::Data;
+		case httpbridge::TxFrameType_Abort: return FrameType::Abort;
+		case httpbridge::TxFrameType_Pause: return FrameType::Pause;
+		case httpbridge::TxFrameType_Resume: return FrameType::Resume;
+		default:
+			HTTPBRIDGE_PANIC("Unrecognized FB frame type");
+		}
+	}
+
+	// TODO: Experiment with reading exactly one frame, and the next frame's first 8 bytes, at a time.
+	// First read 8 bytes for the magic marker and frame length, and thereafter read only
+	// exactly as much as is necessary for that single frame, and the following frame's length.
+	// Then we don't need to do a memmove, and things become simpler.
 	// See if that really produces faster results for average workloads.
 	Backend::InternalRecvResponse Backend::RecvInternal(InFrame& inframe)
 	{
@@ -1199,6 +1219,7 @@ namespace hb
 
 		const size_t maxRecv = 65536;
 		const size_t maxBufSize = 1024*1024;
+		const size_t maxFrameSize = 100*1024*1024;
 		RecvBuf.Preallocate(maxRecv);
 
 		if (RecvBuf.Count >= maxBufSize)
@@ -1209,7 +1230,7 @@ namespace hb
 		}
 
 		// If we don't have at least one frame ready, then read more
-		if (RecvBuf.Count < 4 || RecvBuf.Count < 4 + Read32LE(RecvBuf.Data))
+		if (RecvBuf.Count < 8 || RecvBuf.Count < 8 + Read32LE(RecvBuf.Data + 4))
 		{
 			size_t read = 0;
 			auto result = Transport->Recv(maxRecv, RecvBuf.Data + RecvBuf.Count, read);
@@ -1223,33 +1244,39 @@ namespace hb
 		}
 
 		// Process frame
-		if (RecvBuf.Count >= 4)
+		if (RecvBuf.Count >= 8)
 		{
-			uint32_t frameSize = Read32LE(RecvBuf.Data);
-			if (RecvBuf.Count >= frameSize + 4)
+			uint32_t magic = Read32LE(RecvBuf.Data);
+			uint32_t frameSize = Read32LE(RecvBuf.Data + 4);
+			if (magic != MagicFrameMarker || frameSize > maxFrameSize)
+			{
+				AnyLog()->Logf("Received invalid frame. First 2 dwords: %x %x\n", magic, frameSize);
+				Close();
+				return {InternalRecvResult::Closed, Status000_NULL};
+			}
+			if (RecvBuf.Count >= frameSize + 8)
 			{
 				// We have a frame to process.
-				const httpbridge::TxFrame* txframe = httpbridge::GetTxFrame((uint8_t*) RecvBuf.Data + 4);
-				FrameStatus headStatus = FrameOK;
-				FrameStatus bodyStatus = FrameOK;
+				const httpbridge::TxFrame* txframe = httpbridge::GetTxFrame((uint8_t*) RecvBuf.Data + 8);
+				FrameStatus headStatus = FrameStatus::OK;
+				FrameStatus bodyStatus = FrameStatus::OK;
 				if (txframe->frametype() == httpbridge::TxFrameType_Header)
 				{
 					headStatus = UnpackHeader(txframe, inframe);
 					inframe.IsHeader = true;
 					inframe.IsLast = !!(txframe->flags() & httpbridge::TxFrameFlags_Final);
 					bodyStatus = UnpackBody(txframe, inframe);
-					if (headStatus == FrameOK && !inframe.Request->ParseURI())
-						headStatus = FrameURITooLong;
+					if (headStatus == FrameStatus::OK && !inframe.Request->ParseURI())
+						headStatus = FrameStatus::URITooLong;
 				}
 				else if (txframe->frametype() == httpbridge::TxFrameType_Body)
 				{
 					bodyStatus = UnpackBody(txframe, inframe);
 					inframe.IsLast = !!(txframe->flags() & httpbridge::TxFrameFlags_Final);
 				}
-				else if (txframe->frametype() == httpbridge::TxFrameType_Abort)
+				else if (IsControlFrame(txframe->frametype()))
 				{
-					inframe.IsAborted = true;
-					inframe.IsLast = false;
+					bodyStatus = UnpackControlFrame(txframe, inframe);
 				}
 				else
 				{
@@ -1257,22 +1284,22 @@ namespace hb
 					Close();
 					return {InternalRecvResult::Closed, Status000_NULL};
 				}
-				RecvBuf.EraseFromStart(4 + frameSize);
-				if (headStatus != FrameOK || bodyStatus != FrameOK)
+				RecvBuf.EraseFromStart(8 + frameSize);
+				if (headStatus != FrameStatus::OK || bodyStatus != FrameStatus::OK)
 				{
-					if (headStatus == FrameURITooLong)
+					if (headStatus == FrameStatus::URITooLong)
 					{
 						return {InternalRecvResult::BadFrame, Status414_URI_Too_Long};
 					}
-					else if (headStatus == FrameOutOfMemory || bodyStatus == FrameOutOfMemory)
+					else if (headStatus == FrameStatus::OutOfMemory || bodyStatus == FrameStatus::OutOfMemory)
 					{
 						return {InternalRecvResult::BadFrame, Status503_Service_Unavailable};
 					}
-					else if (bodyStatus == FrameBodyLongerThanContentLength)
+					else if (bodyStatus == FrameStatus::BodyLongerThanContentLength)
 					{
 						return {InternalRecvResult::BadFrame, Status400_Bad_Request};
 					}
-					else if (bodyStatus == FrameStreamNotFound)
+					else if (bodyStatus == FrameStatus::StreamNotFound)
 					{
 						// The only time we expect to receive FrameStreamNotFound, is when we have already
 						// terminated a stream, but the client is still trying to send us data on that stream.
@@ -1299,7 +1326,7 @@ namespace hb
 		size_t headerBlockSize = TotalHeaderBlockSize(txframe);
 		uint8_t* hblock = (uint8_t*) Alloc(headerBlockSize, Log, false);
 		if (hblock == nullptr)
-			return FrameOutOfMemory;
+			return FrameStatus::OutOfMemory;
 
 		auto lines = (Request::HeaderLine*) hblock;								// header lines
 		int32_t hpos = (headers->size() + 1) * sizeof(Request::HeaderLine);		// offset into hblock
@@ -1338,7 +1365,7 @@ namespace hb
 
 		inframe.Request.reset(new hb::Request());
 		inframe.Request->Initialize(this, TranslateVersion(txframe->version()), txframe->channel(), txframe->stream(), headers->size(), hblock);
-		return FrameOK;
+		return FrameStatus::OK;
 	}
 
 	Backend::FrameStatus Backend::UnpackBody(const httpbridge::TxFrame* txframe, InFrame& inframe)
@@ -1354,7 +1381,7 @@ namespace hb
 					bodySize = txframe->body()->size();
 				AnyLog()->Logf("Received body bytes for unknown stream [%llu:%llu] (%d body bytes)", txframe->channel(), txframe->stream(), (int) bodySize);
 				CurrentRequestLock.unlock();
-				return FrameStreamNotFound;
+				return FrameStatus::StreamNotFound;
 			}
 			inframe.Request = cr->second.Request;
 			CurrentRequestLock.unlock();
@@ -1362,7 +1389,7 @@ namespace hb
 
 		// Empty body frames are a waste, but not an error. Likely to be the final frame.
 		if (txframe->body() == nullptr)
-			return FrameOK;
+			return FrameStatus::OK;
 
 		if (inframe.Request->IsBuffered)
 		{
@@ -1371,25 +1398,25 @@ namespace hb
 			if (buf.Count + inframe.BodyBytesLen > inframe.Request->ContentLength)
 			{
 				AnyLog()->Logf("Request sent too many body bytes. Ignoring frame [%llu:%llu] and aborting stream", txframe->channel(), txframe->stream());
-				return FrameBodyLongerThanContentLength;
+				return FrameStatus::BodyLongerThanContentLength;
 			}
 			// Check to see if we're going to exceed MaxWaitingBufferTotal.
 			// Assume that a buffer realloc is going to grow by buf.Capacity (ie 2x growth).
 			if (buf.Count + txframe->body()->size() > buf.Capacity && BufferedRequestsTotalBytes + buf.Capacity > MaxWaitingBufferTotal)
 			{
 				AnyLog()->Logf("MaxWaitingBufferTotal exceeded when receiving frame [%llu:%llu]", txframe->channel(), txframe->stream());
-				return FrameOutOfMemory;
+				return FrameStatus::OutOfMemory;
 			}
 			auto oldBufCapacity = buf.Capacity;
 			if (!buf.TryWrite(txframe->body()->Data(), txframe->body()->size()))
 			{
 				AnyLog()->Logf("Failed to allocate memory for body frame [%llu:%llu]", txframe->channel(), txframe->stream());
-				return FrameOutOfMemory;
+				return FrameStatus::OutOfMemory;
 			}
 			BufferedRequestsTotalBytes += buf.Capacity - oldBufCapacity;
 			inframe.BodyBytesLen = txframe->body()->size();
 			inframe.BodyBytes = buf.Data + buf.Count - txframe->body()->size();
-			return FrameOK;
+			return FrameStatus::OK;
 		}
 		else
 		{
@@ -1400,8 +1427,35 @@ namespace hb
 				inframe.BodyBytes = (uint8_t*) Alloc(inframe.BodyBytesLen, Log);
 				memcpy(inframe.BodyBytes, txframe->body()->Data(), inframe.BodyBytesLen);
 			}
-			return FrameOK;
+			return FrameStatus::OK;
 		}
+	}
+
+	Backend::FrameStatus Backend::UnpackControlFrame(const httpbridge::TxFrame* txframe, InFrame& inframe)
+	{
+		inframe.Type = FBTypeToFrameType(txframe->frametype());
+		if (inframe.Request == nullptr)
+		{
+			CurrentRequestLock.lock();
+			auto cr = CurrentRequests.find(MakeStreamKey(txframe->channel(), txframe->stream()));
+			if (cr == CurrentRequests.end())
+			{
+				AnyLog()->Logf("Received control frame '%s' for unknown stream [%llu:%llu]", httpbridge::EnumNameTxFrameType(txframe->frametype()), txframe->channel(), txframe->stream());
+				CurrentRequestLock.unlock();
+				return FrameStatus::StreamNotFound;
+			}
+			inframe.Request = cr->second.Request;
+			CurrentRequestLock.unlock();
+			switch (inframe.Type)
+			{
+			case FrameType::Abort: inframe.Request->SetState(StreamState::Aborted); break;
+			case FrameType::Pause: inframe.Request->SetState(StreamState::Paused); break;
+			case FrameType::Resume: inframe.Request->SetState(StreamState::Active); break;
+			default:
+				HTTPBRIDGE_PANIC("Unexpected control frame type");
+			}
+		}
+		return FrameStatus::OK;
 	}
 
 	size_t Backend::TotalHeaderBlockSize(const httpbridge::TxFrame* frame)
@@ -1450,6 +1504,14 @@ namespace hb
 		tmp->Stream = stream;
 		Response response(tmp, status);
 		Send(response);
+	}
+
+	Backend::RequestState* Backend::GetRequest(uint64_t channel, uint64_t stream)
+	{
+		auto iter = CurrentRequests.find(MakeStreamKey(channel, stream));
+		if (iter == CurrentRequests.end())
+			return nullptr;
+		return &iter->second;
 	}
 
 	Backend::RequestState* Backend::GetRequestOrDie(uint64_t channel, uint64_t stream)
@@ -1626,6 +1688,7 @@ namespace hb
 
 	Request::Request()
 	{
+		_State = StreamState::Active;
 	}
 
 	Request::~Request()
@@ -1645,6 +1708,24 @@ namespace hb
 		const char* contentLength = HeaderByName(Header_Content_Length);
 		if (contentLength != nullptr)
 			ContentLength = (uint64_t) atoi64(contentLength);
+	}
+
+	StreamState Request::State() const
+	{
+		return _State;
+	}
+
+	void Request::SetState(StreamState newState)
+	{
+		if (newState == StreamState::Aborted)
+			_State = newState;
+		else
+		{
+			// A stream that has been aborted may never leave the aborted state, so we guarantee that here
+			StreamState existing = _State;
+			if (existing != StreamState::Aborted)
+				_State.compare_exchange_strong(existing, newState);
+		}
 	}
 
 	ConstString Request::Method() const
@@ -1692,6 +1773,18 @@ namespace hb
 	{
 		const char* v = Query(key);
 		return v == nullptr ? "" : v;
+	}
+
+	int64_t Request::QueryInt64(const char* key) const
+	{
+		const char* v = Query(key);
+		return v ? atoi64(v) : 0;
+	}
+
+	double Request::QueryDouble(const char* key) const
+	{
+		const char* v = Query(key);
+		return v ? strtod(v, nullptr) : 0;
 	}
 
 	int32_t Request::NextQuery(int32_t iterator, const char*& key, const char*& value) const
@@ -2090,12 +2183,17 @@ namespace hb
 		// This is not a 'hack' in the sense that it's bad or needs to be removed at some point.
 		// It's simply not the intended use of FBB.
 		// Right here 'len' contains the size of the flatbuffer, which is our "frame size"
-		uint8_t frame_size[4];
-		Write32LE(frame_size, (uint32_t) len);
-		FBB->PushBytes(frame_size, 4);
+		uint8_t b4[4];
+		Write32LE(b4, (uint32_t) len);
+		FBB->PushBytes(b4, 4);
+
+		// Write out magic frame marker. This is just used to catch bugs in framing code.
+		Write32LE(b4, (uint32_t) MagicFrameMarker);
+		FBB->PushBytes(b4, 4);
+
 		len = FBB->GetSize();
 		buf = FBB->GetBufferPointer();
-		// Now 'len' contains the size of the flatbuffer + 4
+		// Now 'len' contains the size of the flatbuffer + 8
 
 		IsFlatBufferBuilt = true;
 	}

@@ -3,6 +3,7 @@
 *.ilk
 .tundra2.*
 t2-output/*
+flatc/
 example-backend
 example-backend.exe
 http-bridge.obj

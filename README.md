@@ -139,11 +139,26 @@ multiple threads. The exact list of functions that are safe to call from multipl
 * RequestDestroyed()
 * AnyLog()
 
+#### Abort, Pause, Resume
+Every frame that the server sends you fall into one of 4 categories:
+
+* Data
+* Abort
+* Pause
+* Resume
+
+A data frame contains HTTP headers and/or the body of the request.
+The other frames are control frames.
+
+An Abort frame is sent by the server when something goes wrong, such as
+a client disconnecting. If you receive an Abort frame, then you should perform no further
+processing on that stream. Any response that you send to an aborted stream will be discarded.
+
+A Pause frame is sent by the server when the TCP send buffer to the client is full.
+The backend must not send any more response body frames until it receives a subsequent
+Resume frame for that stream.
+
 ## TODO
-* Implement rate limiting mechanism, which relies on the HTTP server telling us that the TCP socket
-connected to the client browser doesn't want any more data yet. This would require a new kind of frame
-that gets sent from server to backend. At present, I suspect we're in very bad territory here for large
-file transmissions.
 * Add a test where a long upload is in progress, and the client disconnects, leaving the backend
 to handle an ABORT frame.
 * Add a test where a backend is transmitting a large response body, and the client disconnects,

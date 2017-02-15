@@ -2,13 +2,13 @@ namespace httpbridge;
 
 // Header frames always contain the entire header. They may also contain body data.
 // Body frames only contain body data, as well as 'channel' and 'stream'.
-// Pause and Continue frames contain nothing except for the channel and stream.
+// Pause and Resume frames contain nothing except for the channel and stream.
 enum TxFrameType : byte {
 	Header = 0,
 	Body,
 	Abort,
-	Pause,				// Sent from server to backend, to indicate backpressure. Pause transmission of response on this stream.
-	Continue			// Sent from server to backend, to unpause response transmission.
+	Pause,			// Sent from server to backend, to indicate backpressure. Pause transmission of response on this stream.
+	Resume			// Sent from server to backend, to unpause response transmission.
 }
 
 enum TxHttpVersion : byte {
@@ -36,7 +36,7 @@ table TxHeaderLine {
 
 table TxFrame {
 	frametype:			TxFrameType = Header;
-	version:			TxHttpVersion = Http10;
+	version:			TxHttpVersion = Http10;		// Not populated for Abort, Pause, Resume frames
 	flags:				ubyte;
 	channel:			ulong;						// A TCP connection
 	stream:				ulong;						// An HTTP/2 stream

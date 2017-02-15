@@ -6,9 +6,11 @@ import (
 	"fmt"
 	"io"
 	"io/ioutil"
+	"math/rand"
 	"net/http"
 	"os"
 	"os/exec"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -82,12 +84,17 @@ func kill_cpp(t *testing.T, kill_external_backend bool) {
 		if err == nil {
 			io.Copy(ioutil.Discard, resp.Body)
 			resp.Body.Close()
+		} else {
+			fmt.Printf("Error stopping cpp server: %v\n", err)
 		}
 	}
 
 	if cpp_server != nil {
 		cpp_server.Wait()
 		fmt.Printf("cpp server stopped\n")
+		if t != nil {
+			t.Logf("cpp server stopped")
+		}
 		success := cpp_server.ProcessState.Success()
 		if !success || *valgrind {
 			msg := fmt.Sprintf("cpp stdout:\n%v\ncpp stderr:\n%v\n", string(cpp_server_out.Bytes()), string(cpp_server_err.Bytes()))
@@ -127,7 +134,7 @@ func restart(t *testing.T) {
 		front_server = &Server{}
 		front_server.HttpPort = serverFrontPort
 		front_server.BackendPort = serverBackendPort
-		front_server.Log.Level = LogLevelWarn // You'll sometimes want to change this to LogLevelDebug when debugging.
+		front_server.Log.Level = LogLevelInfo // You'll sometimes want to change this to LogLevelDebug when debugging.
 		go front_server.ListenAndServe()
 	}
 
@@ -153,13 +160,16 @@ func restart(t *testing.T) {
 	// Wait for backend to come alive
 	startWait := time.Now()
 	timeout := 5 * time.Second
-	time.Sleep(10 * time.Millisecond)
+	time.Sleep(30 * time.Millisecond)
 	for time.Now().Sub(startWait) < timeout {
+		fmt.Printf("ping...\n")
 		resp, err := pingClient.Get(baseUrl + "/ping")
 		if err == nil {
 			io.Copy(ioutil.Discard, resp.Body)
 			resp.Body.Close()
 			if resp.StatusCode == http.StatusOK {
+				fmt.Printf("Backend is alive\n")
+				t.Logf("Backend is alive")
 				break
 			} else {
 				t.Logf("Waiting for backend to come alive... code = %v\n", resp.StatusCode)
@@ -205,7 +215,7 @@ func (s *slowReader) Read(p []byte) (int, error) {
 	copy(p, buf[:n])
 	if err == nil {
 		s.lastTime = start
-		fmt.Printf("Slow sending %v bytes (total = %v)\n", n, s.totalRead)
+		//fmt.Printf("Slow sending %v bytes (total = %v)\n", n, s.totalRead)
 	} else {
 		fmt.Printf("Error slow sending %v\n", err)
 	}
@@ -230,6 +240,49 @@ type dumbReader struct {
 
 func (r *dumbReader) Read(p []byte) (int, error) {
 	return r.raw.Read(p)
+}
+
+func doRequestAndReadSlowly(t *testing.T, url string, bytesPerSecond int, totalRead *uint64) {
+	req, err := http.NewRequest("GET", baseUrl+url, nil)
+	if err != nil {
+		t.Fatalf("%v: Error creating request: %v", url, err)
+	}
+	resp, err := requestClient.Do(req)
+	if err != nil {
+		t.Fatalf("%v: Error executing request: %v", url, err)
+	}
+	defer resp.Body.Close()
+	chunkSize := 65536
+	if bytesPerSecond > 0 {
+		chunkSize = bytesPerSecond / 5
+		if chunkSize > 65536 {
+			chunkSize = 65536
+		}
+	}
+	// if bytesPerSecond is more than threshold, then never sleep
+	enableThrottle := bytesPerSecond > 0 && bytesPerSecond < 10*1000*1000
+	chunk := make([]byte, chunkSize)
+	start := time.Now()
+	pos := 0
+	for {
+		ideal_pos := int(time.Now().Sub(start).Seconds() * float64(bytesPerSecond))
+		if enableThrottle && pos > ideal_pos {
+			// slow down by a random amount. Randomness prevents a thundering hurd.
+			time.Sleep(time.Duration(rand.Int31n(20)) * time.Millisecond)
+		} else {
+			// catch up
+			n, err := resp.Body.Read(chunk)
+			//fmt.Printf("SlowRead %v (%v)\n", n, err)
+			pos += n
+			atomic.AddUint64(totalRead, uint64(n))
+			if err == io.EOF {
+				break
+			}
+			if err != nil {
+				t.Fatalf("Error slow reading from %v: %v", url, err)
+			}
+		}
+	}
 }
 
 // In order to get a chunked request, set bodyLen = -1. In addition, you must use an io.Reader
@@ -307,13 +360,15 @@ func withCombinations(t *testing.T, f func()) {
 }
 
 func TestMain(m *testing.M) {
+	fmt.Printf("TestMain enter\n")
 	if err := setup(); err != nil {
-		fmt.Printf("%v\n", err)
+		fmt.Printf("SETUP ERROR: %v\n", err)
 		os.Exit(1)
 	}
 	res := m.Run()
 	teardown()
 	os.Exit(res)
+	fmt.Printf("TestMain exit: %v\n", res)
 }
 
 func TestHelloWorld(t *testing.T) {
@@ -401,11 +456,124 @@ func TestServerOutOfMemory_Late(t *testing.T) {
 	<-wait
 }
 
+// Test connection throughput by firing up numConnections simultaneous connections,
+// with an expected aggregate throughput equal to averageAggregateBytesPerSecond.
+func testThroughputWith(t *testing.T, numConnections int, averageAggregateBytesPerSecond int, withSlow bool) {
+	restart(t)
+	totalExpected := uint64(0)
+	totalRead := uint64(0)
+	done := uint64(0)
+	duration_seconds := 10
+
+	// Create some slow and some fast readers
+	numSlow := numConnections / 2
+	if !withSlow {
+		numSlow = 0
+	}
+	// The slow speed can't be TOO slow, otherwise it takes too long to fill the TCP buffer.
+	slowSpeed := 200000
+	fastSpeed := (averageAggregateBytesPerSecond - (numSlow * slowSpeed)) / (numConnections - numSlow)
+
+	const meg = 1024 * 1024
+
+	// You must make the minimum size quite large, like 2MB, otherwise the TCP receive buffer
+	// of the HTTP client just eats it all up, and you don't end up with blocking buffers on the send side.
+	minSize := 2 * meg
+
+	fmt.Printf("Theoretical speed: %v MB/s\n", (numSlow*slowSpeed+(numConnections-numSlow)*fastSpeed)/meg)
+	fmt.Printf("Slow speed: %v KB/s\n", slowSpeed/1024)
+	fmt.Printf("Fast speed: %v KB/s\n", fastSpeed/1024)
+
+	for i := 0; i < numConnections; i++ {
+		launch := func(bytesPerSecond int) {
+			fmt.Printf("Launching %v\n", bytesPerSecond)
+			size := minSize + bytesPerSecond*duration_seconds
+			limit := bytesPerSecond
+			if !withSlow {
+				limit = -1
+			}
+			atomic.AddUint64(&totalExpected, uint64(size))
+			doRequestAndReadSlowly(t, fmt.Sprintf("/garbage-stream?Size=%v", size), limit, &totalRead)
+			if bytesPerSecond == slowSpeed {
+				fmt.Printf("Finished slow\n")
+			} else {
+				fmt.Printf("Finished fast\n")
+			}
+			atomic.AddUint64(&done, 1)
+		}
+		if i < numSlow {
+			go launch(slowSpeed)
+		} else {
+			go launch(fastSpeed)
+		}
+	}
+
+	start := time.Now()
+	totalReadAtStart := atomic.LoadUint64(&totalRead)
+
+	for {
+		elapsed := time.Now().Sub(start)
+		bps := float64(atomic.LoadUint64(&totalRead)-totalReadAtStart) / elapsed.Seconds()
+		expected := float64(averageAggregateBytesPerSecond)
+		bps_percent := 100.0 * float64(bps) / float64(expected)
+		meg := 1024.0 * 1024.0
+		fmt.Printf("MB per second: %.3f (%.1f%%) (expected %v, %v connections)\n", bps/meg, bps_percent, expected/meg, numConnections)
+		totalReadAtStart = atomic.LoadUint64(&totalRead)
+		start = time.Now()
+		time.Sleep(1 * time.Second)
+		if atomic.LoadUint64(&done) == uint64(numConnections) {
+			break
+		}
+	}
+	if totalRead != totalExpected {
+		t.Errorf("Total bytes read != expected bytes read (%v expected. %v actual)", totalExpected, totalRead)
+	}
+}
+
+func TestThroughputSlow(t *testing.T) {
+
+	/* How to validate this test?
+
+	Run "go test -v httpbridge -run TestThroughputSlow", and you should see:
+
+		MB per second: 246.416 (82.1%) (expected 300, 2 connections)
+		MB per second: 240.714 (80.2%) (expected 300, 2 connections)
+		MB per second: 229.215 (76.4%) (expected 300, 2 connections)
+		MB per second: 237.031 (79.0%) (expected 300, 2 connections)
+		MB per second: 235.924 (78.6%) (expected 300, 2 connections)
+
+	Then, in server.go, set enablePause = false, and run the same test again, and you should see:
+
+		MB per second: 3.069 (1.0%) (expected 300, 2 connections)
+		MB per second: 0.191 (0.1%) (expected 300, 2 connections)
+		MB per second: 0.691 (0.2%) (expected 300, 2 connections)
+		MB per second: 0.191 (0.1%) (expected 300, 2 connections)
+		MB per second: 0.191 (0.1%) (expected 300, 2 connections)
+
+	There are some tweaky numbers that you need to get right here in order for this
+	issue to show it's face:
+
+	* responseChanBufferSize must not be too large
+	* The minimum size of the response must be around 2MB (see minSize in testThroughputWith), otherwise
+		the OS TCP receive buffer of the HTTP client eats up all the slack, and you never get
+		TCP blocking.
+	* The "slow" speed must be reasonably high, otherwise you never end up saturating that 2MB TCP buffer.
+
+	*/
+	testThroughputWith(t, 2, 300*1024*1024, true)
+}
+
+func TestThroughputManySmall(t *testing.T) {
+	// On my Sandy Bridge 2600K, I get about 300 MB/s. Peak observed: 343
+	testThroughputWith(t, 300, 300*1024*1024, false)
+}
+
 func TestTimeout(t *testing.T) {
 	restart(t)
 	oldTimeout := front_server.BackendTimeout
 	defer func() {
 		front_server.BackendTimeout = oldTimeout
+		fmt.Printf("timeout restored to %v\n", oldTimeout)
 	}()
 	// cpp server sleeps for 100 ms
 	front_server.BackendTimeout = 50 * time.Millisecond

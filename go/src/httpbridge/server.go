@@ -27,13 +27,27 @@ const frameBaseSize = 100
 // If we don't have a queue, then the big main loop inside handleBackendConnection, which fetches
 // data out of the backend's TCP socket, will block if it tries to write to a responseChan that
 // is full. This will happen when the TCP socket that is writing to the client stalls, which
-// is a very frequent occurrence (ie we have more data than we can send in an instant).
-// So, this queue is here mainly as a threshold that we can use to detect when to tell a backend
+// is a very frequent occurrence (ie we are exceeding the data rate of the browser's TCP socket).
+// So, this queue is here partly as a threshold that we can use to detect when to tell a backend
 // that it must pause sending on a particular stream. Once we see that the client queue has drained,
-// then we can inform the backend that it is once again clear to send.
-// The number 10 is a thumb suck, and is just intended as a performance safeguard until we've
-// implemented rate limiting. I think that a reasonable buffer size is somewhere between 1 and 3.
-const responseChanBufferSize = 10
+// then we inform the backend that it is once again clear to send.
+// This is an annoying burden to place on the client, and it may someday be necessary to implement
+// a send buffer on the client side, so that most high level code doesn't need to worry about this,
+// and it can rely instead on the backend to automatically buffer up some amount of transmit data,
+// for paused streams. Increasing the buffer size here is definitely not an ideal thing to do, because
+// it adds more memory pressure to the single load balancer process.
+const responseChanBufferSize = 20
+
+// When the queue length of a response channel reaches this number, we send a PAUSE frame to the backend.
+const responseChanBufferHigh = 15
+
+// When the queue length of a response channel drops to this number, we send a RESUME frame to the backend.
+const responseChanBufferLow = 5
+
+// This is always on, but I leave the switch up here to make testing easier.
+const enablePause = true
+
+const magicFrameMarker = 0x48426268
 
 type sendBodyResult int
 
@@ -72,8 +86,9 @@ type Server struct {
 	// 'responses' holds a response channel for each HTTP2 stream
 	// Access to 'responses' is guarded by 'responsesLock'. You do not need to own the lock
 	// to send data to a channel. The lock is only guarding the map data structure.
+	// However, if you use streamInfo.state, then you must do so using atomics
 	responsesLock sync.Mutex
-	responses     map[streamID]responseChan
+	responses     map[streamID]*streamInfo
 
 	stoppedChan chan bool // We never send anything to this channel. But a select{} will wake when the channel is closed, which is how this get used.
 
@@ -86,10 +101,43 @@ type serverAtomics struct {
 	stopped     int32
 }
 
+type streamState uint32
+
+const (
+	streamStateActive streamState = iota
+	streamStatePaused
+	streamStateAborted
+)
+
+type streamInfo struct {
+	state streamState // This is manipulated atomically. Use getState() and setState(), which do atomic accesses.
+	rchan responseChan
+}
+
+func (i *streamInfo) getState() streamState {
+	return streamState(atomic.LoadUint32((*uint32)(&i.state)))
+}
+
+func (i *streamInfo) setState(s streamState) {
+	mem := (*uint32)(&i.state)
+	if s == streamStateAborted {
+		atomic.StoreUint32(mem, uint32(s))
+	} else {
+		// Make sure that we never bring a stream out of the aborted state, so...
+		// Try Active -> NewState,
+		// Try Paused -> NewState,
+		// But never try Aborted -> NewState
+		if !atomic.CompareAndSwapUint32(mem, uint32(streamStateActive), uint32(s)) {
+			atomic.CompareAndSwapUint32(mem, uint32(streamStatePaused), uint32(s))
+		}
+	}
+}
+
 type backendConnection struct {
 	con            net.Conn
 	id             backendID
-	disconnectChan chan bool // We never send anything to this channel. But a select{} will wake when the channel is closed, which is how this get used.
+	disconnectChan chan bool  // We never send anything to this channel. But a select{} will wake when the channel is closed, which is how this get used.
+	conWriteLock   sync.Mutex // Take this whenever you send a frame to con. This is necessary so that a partial send doesn't end up splicing two frames into each other.
 }
 
 func (s *Server) ListenAndServe() error {
@@ -98,7 +146,7 @@ func (s *Server) ListenAndServe() error {
 	s.nextBackendID = 1
 	s.atomics = new(serverAtomics)
 	s.stoppedChan = make(chan bool)
-	s.responses = make(map[streamID]responseChan)
+	s.responses = make(map[streamID]*streamInfo)
 	if s.BackendTimeout == 0 {
 		s.BackendTimeout = time.Second * 120
 	}
@@ -162,11 +210,11 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		if err == nil {
 			break
 		}
-		if findRetries < 5 {
-			s.Log.Errorf("Error retrieving httpbridge backend conn for port %v: %v\n", s.BackendPort, err)
+		if findRetries < 3 {
 			findRetries++
-			time.Sleep(time.Second*2)
+			time.Sleep(time.Second * 1)
 		} else {
+			s.Log.Errorf("Error retrieving httpbridge backend conn for port %v: %v\n", s.BackendPort, err)
 			http.Error(w, err.Error(), http.StatusGatewayTimeout)
 			return
 		}
@@ -183,7 +231,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	// of channel + stream being unique for every request/response.
 	stream := uint64(3)
 
-	responseChan := s.registerStream(channel, stream)
+	streamInfo := s.registerStream(channel, stream)
 	defer s.unregisterStream(channel, stream)
 
 	// ContentLength is -1 when unknown
@@ -199,7 +247,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 
 	sendResponse := true
 	if hasBody {
-		res, responseFrame := s.sendBody(w, req, backend, channel, stream, responseChan)
+		res, responseFrame := s.sendBody(w, req, backend, channel, stream, streamInfo)
 		switch res {
 		case sendBodyResult_Done:
 		case sendBodyResult_SentError:
@@ -210,9 +258,11 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 			// too much memory/space. For example, a chunked upload that ends up being too large.
 			s.Log.Infof("httpbridge request %v:%v aborted prematurely", channel, stream)
 			go func() {
-				// Because our response channel is not buffered, we need to fire up another goroutine
-				// to resend the response frame, otherwise we'd block here.
-				responseChan <- responseFrame
+				// We need to fire up another goroutine to resend the response frame, otherwise it's possible
+				// for us to block here, if the response channel is full.
+				// TODO: no longer true, since adding buffering. The backend can only have sent a premature
+				// response, and that is only one frame, so the response buffer can't be full yet.
+				streamInfo.rchan <- responseFrame
 			}()
 		case sendBodyResult_ServerStop:
 			sendResponse = false
@@ -220,7 +270,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	}
 
 	if sendResponse {
-		s.sendResponse(w, req, backend, channel, stream, responseChan)
+		s.sendResponse(w, req, backend, channel, stream, streamInfo)
 	}
 
 	s.Log.Debugf("HB Request %v:%v finished", channel, stream)
@@ -284,7 +334,7 @@ func (s *Server) sendHeaderFrame(w http.ResponseWriter, req *http.Request, backe
 	TxFrameAddFlags(builder, flags)
 	TxFrameAddHeaders(builder, headers)
 
-	if err := s.endFrameAndSend(backend.con, builder); err != nil {
+	if err := s.endFrameAndSend(backend, builder); err != nil {
 		http.Error(w, fmt.Sprintf("Error writing headers to backend %v (%v)", backend.id, err), http.StatusGatewayTimeout)
 		return false
 	}
@@ -293,8 +343,8 @@ func (s *Server) sendHeaderFrame(w http.ResponseWriter, req *http.Request, backe
 }
 
 // Send the body from the client to the backend
-func (s *Server) sendBody(w http.ResponseWriter, req *http.Request, backend *backendConnection, channel, stream uint64, responseChan responseChan) (sendBodyResult, *TxFrame) {
-	// I have NO IDEA what this buffer size should be. Thoughts revolve around the size of a regular ethernet frame (1522 bytes),
+func (s *Server) sendBody(w http.ResponseWriter, req *http.Request, backend *backendConnection, channel, stream uint64, info *streamInfo) (sendBodyResult, *TxFrame) {
+	// I have no idea what this buffer size should be. Thoughts revolve around the size of a regular ethernet frame (1522 bytes),
 	// or jumbo frames (9000 bytes). Also, you have the multiple simultaneous streams to consider (ie you don't want to bloat
 	// up your front-end's memory with buffers). If the HTTP process and the backend are on the same machine, then I'm guessing you'd
 	// want a buffer quite a bit bigger than an ethernet frame.
@@ -311,7 +361,7 @@ func (s *Server) sendBody(w http.ResponseWriter, req *http.Request, backend *bac
 	for !eof {
 		// Check to see if the backend has sent a premature response, or the server is shutting down
 		select {
-		case frame := <-responseChan:
+		case frame := <-info.rchan:
 			return sendBodyResult_PrematureResponse, frame
 		case <-s.stoppedChan:
 			return sendBodyResult_ServerStop, nil
@@ -319,8 +369,8 @@ func (s *Server) sendBody(w http.ResponseWriter, req *http.Request, backend *bac
 			// continue transmitting body
 		}
 
-		var buf []byte
 		// Only upgrade to a larger buffer if the user has actually sent enough bytes. This limits amplification attacks.
+		var buf []byte
 		if total_body_sent >= dynamic_size {
 			if dynamic_buf == nil {
 				dynamic_buf = make([]byte, dynamic_size)
@@ -332,7 +382,7 @@ func (s *Server) sendBody(w http.ResponseWriter, req *http.Request, backend *bac
 		nread, err := req.Body.Read(buf)
 		eof = err == io.EOF
 		if err != nil && !eof {
-			s.sendAbortFrame(channel, stream, req, backend)
+			s.abortStream(channel, stream, info, backend)
 			http.Error(w, fmt.Sprintf("Error reading body for backend %v (%v)", backend.id, err), http.StatusGatewayTimeout)
 			return sendBodyResult_SentError, nil
 		}
@@ -352,7 +402,7 @@ func (s *Server) sendBody(w http.ResponseWriter, req *http.Request, backend *bac
 		TxFrameAddFlags(builder, flags)
 		TxFrameAddBody(builder, body)
 
-		if err := s.endFrameAndSend(backend.con, builder); err != nil {
+		if err := s.endFrameAndSend(backend, builder); err != nil {
 			http.Error(w, fmt.Sprintf("Error writing body to backend %v (%v)", backend.id, err), http.StatusGatewayTimeout)
 			return sendBodyResult_SentError, nil
 		}
@@ -365,38 +415,51 @@ func (s *Server) sendBody(w http.ResponseWriter, req *http.Request, backend *bac
 	return sendBodyResult_Done, nil
 }
 
+func (s *Server) sendControlFrame(frameType int8, channel, stream uint64, backend *backendConnection) {
+	builder := flatbuffers.NewBuilder(frameBaseSize)
+	s.startFrame(builder, frameType, channel, stream, nil)
+	if err := s.endFrameAndSend(backend, builder); err != nil {
+		s.Log.Warnf("httpbridge Error sending %v frame to backend %v (%v)", EnumNamesTxFrameType[int(frameType)], backend.id, err)
+	}
+}
+
+func (s *Server) abortStream(channel, stream uint64, info *streamInfo, backend *backendConnection) {
+	info.setState(streamStateAborted)
+	s.sendControlFrame(TxFrameTypeAbort, channel, stream, backend)
+}
+
 func (s *Server) startFrame(builder *flatbuffers.Builder, frameType int8, channel, stream uint64, req *http.Request) {
 	TxFrameStart(builder)
 	TxFrameAddFrametype(builder, frameType)
-	TxFrameAddVersion(builder, makeTxHttpVersionNumber(req))
+	if req != nil {
+		TxFrameAddVersion(builder, makeTxHttpVersionNumber(req))
+	}
 	TxFrameAddChannel(builder, channel)
 	TxFrameAddStream(builder, stream)
 }
 
-func (s *Server) sendAbortFrame(channel, stream uint64, req *http.Request, backend *backendConnection) {
-	builder := flatbuffers.NewBuilder(frameBaseSize)
-	s.startFrame(builder, TxFrameTypeAbort, channel, stream, req)
-	if err := s.endFrameAndSend(backend.con, builder); err != nil {
-		s.Log.Warnf("httpbridge Error sending ABORT frame to backend %v (%v)", backend.id, err)
-	}
-}
-
-func (s *Server) endFrameAndSend(dst io.Writer, builder *flatbuffers.Builder) error {
+func (s *Server) endFrameAndSend(backend *backendConnection, builder *flatbuffers.Builder) error {
 	frame := TxFrameEnd(builder)
 	builder.Finish(frame)
 	frame_size := uint32(builder.Offset())
 
-	// Our frame is done. We now prepend our frame with a 32-bit Little Endian frame size, and we are ready to transmit
-
+	// Our frame is done.
+	// We now prepend our frame with a 32-bit Little Endian frame size
 	builder.Prep(flatbuffers.SizeUint32, flatbuffers.SizeUint32)
 	builder.PrependUint32(frame_size)
 
+	// Also add our magic marker, which is just here to catch bugs in our frame packing/unpacking code
+	builder.Prep(flatbuffers.SizeUint32, flatbuffers.SizeUint32)
+	builder.PrependUint32(magicFrameMarker)
+
 	frame_buf := builder.Bytes[builder.Head() : builder.Head()+builder.Offset()]
 
-	return s.sendBytes(dst, frame_buf)
+	backend.conWriteLock.Lock()
+	err := s.sendBytes(backend.con, frame_buf)
+	backend.conWriteLock.Unlock()
+	return err
 }
 
-// I suspect a more idiomatic way of writing this function would be to use io.Copy()
 func (s *Server) sendBytes(dst io.Writer, buf []byte) error {
 	for len(buf) != 0 {
 		nwrite, err := dst.Write(buf)
@@ -408,23 +471,30 @@ func (s *Server) sendBytes(dst io.Writer, buf []byte) error {
 	return nil
 }
 
-func (s *Server) sendResponse(w http.ResponseWriter, req *http.Request, backend *backendConnection, channel, stream uint64, responseChan responseChan) {
+func (s *Server) sendResponse(w http.ResponseWriter, req *http.Request, backend *backendConnection, channel, stream uint64, info *streamInfo) {
 	haveSentHeader := false
-	for done := false; !done; {
+	for {
 		// If we've already sent the header of the response to the client, and the backend faults
 		// by timing out, or disconnecting, then we can't send another header, so we have to just
 		// return, and let the Go HTTP serving infrastructure handle the abort to the client.
 		select {
-		case frame := <-responseChan:
+		case frame := <-info.rchan:
 			if err := s.sendResponseFrame(w, req, backend, channel, stream, frame); err != nil {
 				if err != io.EOF {
 					// The client is unable to receive our response, so inform the backend to stop trying
 					// to send any more data.
-					s.sendAbortFrame(channel, stream, req, backend)
+					s.abortStream(channel, stream, info, backend)
 				}
 				return
 			} else {
 				haveSentHeader = true
+			}
+
+			if info.getState() == streamStatePaused && len(info.rchan) <= responseChanBufferLow {
+				// Resume
+				//fmt.Printf("Resuming %v:%v\n", channel, stream)
+				s.sendControlFrame(TxFrameTypeResume, channel, stream, backend)
+				info.setState(streamStateActive)
 			}
 		case <-backend.disconnectChan:
 			if !haveSentHeader {
@@ -438,21 +508,7 @@ func (s *Server) sendResponse(w http.ResponseWriter, req *http.Request, backend 
 				http.Error(w, "httpbridge backend timeout", http.StatusGatewayTimeout)
 			}
 			s.Log.Warnf("httpbridge backend timeout: %v:%v", channel, stream)
-			done = true
-		}
-	}
-
-	// Backend Timeout; Drain the response channel
-	for {
-		select {
-		case frame := <-responseChan:
-			if (frame.Flags() & TxFrameFlagsFinal) != 0 {
-				s.Log.Warnf("httpbridge timed-out response is finished: %v:%v", channel, stream)
-				return
-			}
-		case <-backend.disconnectChan:
-			return
-		case <-s.stoppedChan:
+			s.abortStream(channel, stream, info, backend)
 			return
 		}
 	}
@@ -556,50 +612,112 @@ func clampInt64(v, min, max int64) int64 {
 }
 
 func (s *Server) handleBackendConnection(backend *backendConnection) {
-	// One may be tempted here to try and reuse a single buffer to read incoming data.
+	// One may be tempted here to try and reuse a single circular buffer to read incoming data.
 	// That doesn't work though, because you end up having to produce a copy of the entire
 	// frame, so that you can use that as a flatbuffer which you pass out to the channel
-	// that ends up sending the data back over HTTP.
-	// To keep things simple, we never read over a frame boundary.
+	// that ends up sending the data back over HTTP. The thing reading from that channel
+	// needs a copy of the data, so that it can write it out at it's own pace,
+	// hence circular buffer is out of the question.
+
+	// However, the socket read behaviour here is not all that bad. What we do is this:
+	// 1. Read 8 bytes of magic,framesize
+	// 2. Read framesize + 8 bytes of next frame
+	// X. Repeat (2)
+	// The key thing here is that we usually perform just one read per frame. Initially,
+	// we would read just 8 bytes for the magic + frame size, and then the frame, and
+	// then another 8 byte read, but I then figured out that we can speculatively read
+	// the first 8 bytes of the next frame, in order to get rid of that tiny 8 byte read.
+
 	s.addBackend(backend)
 	s.Log.Infof("New httpbridge backend connection on port %v. ID: %v", s.BackendPort, backend.id)
 	var err error
-	buf := []byte{}
+	buf := make([]byte, 1024)
 	bufSize := 0 // distinct from len(buf). bufSize is how many bytes we've actually read.
+	nFrames := 0
+	sentLargeFrameWarning := false
 	for {
 		var nbytes int
-		maxRead := clampInt(bufSize, 1024, 70*1024) // 64k of data plus some headers. no science behind these numbers.
+		maxBufSize := 0
 		frameSize := 0
-		if bufSize >= 4 {
-			frameSize = int(binary.LittleEndian.Uint32(buf[:4]))
+		if bufSize >= 8 {
+			magic := binary.LittleEndian.Uint32(buf[0:4])
+			frameSize = int(binary.LittleEndian.Uint32(buf[4:8]))
+			if magic != magicFrameMarker {
+				s.Log.Errorf("Backend %v sent invalid frame #%v. First two dwords: %x %x", backend.id, nFrames, magic, frameSize)
+				break
+			}
+			if frameSize > 100*1024*1024 && !sentLargeFrameWarning {
+				sentLargeFrameWarning = true
+				s.Log.Warnf("Backend %v sent very large frame #%v. First two dwords: %x %x", backend.id, nFrames, magic, frameSize)
+			}
+			maxBufSize = frameSize + 16
+			//fmt.Printf("Have a valid frame %x %x\n", magic, frameSize)
 		} else {
-			maxRead = 4
+			maxBufSize = 8
 		}
 
-		// Never read over a frame boundary
-		if maxRead > frameSize+4-bufSize {
-			maxRead = frameSize + 4 - bufSize
+		// Check if we need to grow buf
+		if len(buf) < maxBufSize {
+			if maxBufSize >= 50*1024*1024 {
+				s.Log.Warnf("Warning: frame from backend %v is %v MB", backend.id, maxBufSize/(1024*1024))
+			}
+			oldBuf := buf
+			buf = make([]byte, maxBufSize)
+			copy(buf[0:bufSize], oldBuf[0:bufSize])
 		}
-		for len(buf)-bufSize < maxRead {
-			buf = append(buf, 0)
-		}
-		nbytes, err = backend.con.Read(buf[bufSize : bufSize+maxRead])
+		//fmt.Printf("Trying to read %v:%v (%v) bytes (frameSize = %v)\n", bufSize, maxBufSize, maxBufSize-bufSize, frameSize)
+		nbytes, err = backend.con.Read(buf[bufSize:maxBufSize])
 		if err != nil {
 			break
 		}
 		bufSize += nbytes
+
 		s.Log.Debugf("HB Received %v bytes from backend %v (%v)", nbytes, backend.id, bufSize)
-		if frameSize != 0 && bufSize >= 4+frameSize {
-			frame := GetRootAsTxFrame(buf[4:], 0)
-			rchan := s.findStreamChannel(frame.Channel(), frame.Stream())
-			if rchan != nil {
-				s.Log.Debugf("HB Sending frame to chan")
-				rchan <- frame
+		if frameSize != 0 && bufSize >= 8+frameSize {
+			nFrames++
+			sentLargeFrameWarning = false
+			// We already have the first few bytes of the next frame (hopefully 8, but not always), so save it for the new buffer
+			extraSize := bufSize - (8 + frameSize)
+			extraStatic := [8]byte{}
+			extraBytes := []byte{}
+			if extraSize != 0 {
+				extraBytes = extraStatic[0:extraSize]
+				copy(extraBytes[:], buf[8+frameSize:bufSize])
 			}
-			buf = []byte{}
+
+			//frame := GetRootAsTxFrame(buf[8:bufSize], 0) //  BAAAAAAAAAAAAD
+			frame := GetRootAsTxFrame(buf[8:8+frameSize], 0) /// GOOOOOOOOOOOOOD
+			info := s.findStreamInfo(frame.Channel(), frame.Stream())
+			if info != nil {
+				s.Log.Debugf("HB Sending frame to chan")
+				state := info.getState()
+				if state != streamStateAborted {
+					info.rchan <- frame
+				}
+				if state == streamStateActive && len(info.rchan) >= responseChanBufferHigh && enablePause {
+					// Pause
+					//fmt.Printf("Pausing %v:%v\n", frame.Channel(), frame.Stream())
+					info.setState(streamStatePaused)
+					s.sendControlFrame(TxFrameTypePause, frame.Channel(), frame.Stream(), backend)
+				}
+			}
+
+			// Unfortunately we cannot recycle 'buf', because buf now belongs to the flatbuffer
+			// that we have sent to the response channel.
+			// The big question is - how large should the next buffer be. We arbitrarily choose
+			// to make it a little larger than the current one.
+			nextBufSize := bufSize + 256
+			if nextBufSize > 10*1024*1024 {
+				nextBufSize = 10 * 1024 * 1024
+			}
+			buf = make([]byte, nextBufSize)
 			bufSize = 0
+			if extraSize != 0 {
+				copy(buf[0:extraSize], extraBytes[:])
+				bufSize = extraSize
+			}
 		} else {
-			s.Log.Debugf("HB Have %v/%v frame bytes", bufSize-4, frameSize)
+			s.Log.Debugf("HB Have %v/%v frame bytes", bufSize-8, frameSize)
 		}
 	}
 	s.Log.Infof("Closing httpbridge backend connection %v (%v)", backend.id, err)
@@ -611,6 +729,7 @@ func (s *Server) addBackend(backend *backendConnection) {
 	backend.id = s.nextBackendID
 	s.nextBackendID++
 	s.backends = append(s.backends, backend)
+	s.Log.Infof("Backend %v added. %v active", backend.id, len(s.backends))
 	s.backendsLock.Unlock()
 }
 
@@ -623,6 +742,7 @@ func (s *Server) removeBackend(backend *backendConnection) {
 			break
 		}
 	}
+	s.Log.Infof("Backend %v removed. %v remaining", backend.id, len(s.backends))
 	s.backendsLock.Unlock()
 }
 
@@ -640,16 +760,19 @@ func (s *Server) findBackend(req *http.Request) (*backendConnection, error) {
 	}
 }
 
-func (s *Server) registerStream(channel, stream uint64) responseChan {
+func (s *Server) registerStream(channel, stream uint64) *streamInfo {
 	s.responsesLock.Lock()
 	sid := makeStreamID(channel, stream)
 	if _, ok := s.responses[sid]; ok {
 		s.Log.Fatalf("httpbridge registerStream called twice on the same stream (%v:%v)", channel, stream)
 	}
-	c := make(responseChan, responseChanBufferSize)
-	s.responses[sid] = c
+	info := &streamInfo{
+		state: streamStateActive,
+		rchan: make(responseChan, responseChanBufferSize),
+	}
+	s.responses[sid] = info
 	s.responsesLock.Unlock()
-	return c
+	return info
 }
 
 func (s *Server) unregisterStream(channel, stream uint64) {
@@ -659,19 +782,25 @@ func (s *Server) unregisterStream(channel, stream uint64) {
 		s.Log.Fatalf("httpbridge unregisterStream called on a non-existing stream (%v:%v)", channel, stream)
 	}
 	delete(s.responses, sid)
+	// We don't close the channel here, because writing to a closed channel causes a panic.
+	// How could we end up trying to write to this channel if it's closed? That could come
+	// about if we, for some reason, sent an ABORT to the backend for this stream, but
+	// the backend only processes that message after trying to send another frame for
+	// for the stream. So, we just let the garbage collector handle this, and allow those
+	// stray frames to disappear.
 	s.responsesLock.Unlock()
 }
 
-func (s *Server) findStreamChannel(channel, stream uint64) responseChan {
+func (s *Server) findStreamInfo(channel, stream uint64) *streamInfo {
 	s.responsesLock.Lock()
+	defer s.responsesLock.Unlock()
 	sid := makeStreamID(channel, stream)
-	rchan, ok := s.responses[sid]
+	info, ok := s.responses[sid]
 	if !ok {
-		s.Log.Warnf("httpbridge findStreamChannel failed. Looks like backend has timed out (channel %v, stream %v)", channel, stream)
+		s.Log.Warnf("httpbridge findStreamInfo failed. Backend may have timed out (channel %v, stream %v)", channel, stream)
 		return nil
 	}
-	s.responsesLock.Unlock()
-	return rchan
+	return info
 }
 
 func (s *Server) Stop() {
