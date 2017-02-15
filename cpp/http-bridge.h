@@ -91,7 +91,7 @@ HTTPBRIDGE_API HTTPBRIDGE_NORETURN_PREFIX void BuiltinTrap() HTTPBRIDGE_NORETURN
 	{
 		SendResult_All,			// All of the data was sent
 		SendResult_BufferFull,	// Some of the data might have been sent, but the buffer is now full.
-		SendResult_Closed,		// The transport channel has been closed by the OS
+		SendResult_Closed,		// The transport channel has been closed.
 	};
 
 	enum RecvResult
@@ -464,11 +464,12 @@ namespace hb
 		bool				IsConnected();
 		void				Close();
 		SendResult			Send(Response& response);
-		SendResult			Send(ConstRequestPtr request, StatusCode status);						// Convenience method for sending a simple response
-		SendResult			SendBodyPart(ConstRequestPtr request, const void* body, size_t len);	// Stream out the body of a response.
-		bool				Recv(InFrame& frame);													// Returns true if a frame was received
-		bool				ResendWhenBodyIsDone(InFrame& frame);									// Called by InFrame.ResendWhenBodyIsDone(). Returns false if out of memory.
+		SendResult			Send(ConstRequestPtr request, StatusCode status);									// Convenience method for sending a simple response
+		SendResult			SendBodyPart(ConstRequestPtr request, const void* body, size_t len, bool isFinal);	// Stream out the body of a response. isFinal is necessary for chunked responses; must be true on the final frame.
+		bool				Recv(InFrame& frame);																// Returns true if a frame was received
+		bool				ResendWhenBodyIsDone(InFrame& frame);												// Called by InFrame.ResendWhenBodyIsDone(). Returns false if out of memory.
 		Logger*				AnyLog();
+		void				UnregisterBufferedBytes(size_t bytes);												// Called by Request's destructor, if it has a buffered request.
 
 	private:
 		enum class FrameStatus
@@ -530,6 +531,7 @@ namespace hb
 		RequestState*			GetRequestOrDie(uint64_t channel, uint64_t stream);
 		static StreamKey		MakeStreamKey(uint64_t channel, uint64_t stream);
 		static StreamKey		MakeStreamKey(ConstRequestPtr request);
+		static StreamKey		MakeStreamKey(const httpbridge::TxFrame* txframe);
 	};
 
 	/* HTTP request
@@ -705,7 +707,9 @@ namespace hb
 		Response& operator=(Response&& b);
 
 		// Return a Response object that contains a portion of the response body
-		static Response MakeBodyPart(ConstRequestPtr request, const void* part, size_t len);
+		// If this is a chunked response (ie Content-Length = -1), and this is the final frame of the response,
+		// then isFinal must be true.
+		static Response MakeBodyPart(ConstRequestPtr request, const void* part, size_t len, bool isFinal);
 
 		~Response();
 

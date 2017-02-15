@@ -97,7 +97,11 @@ a good idea to reconnect to the server automatically inside that loop, for the c
 is restarted (the example does this).
 
 Frames that are received by Backend.Recv have a few flags that you need to pay attention to in order to
-decide what kind of action to take on that frame. Firstly, the IsHeader flag tells you that the frame
+decide what kind of action to take on that frame.
+Firstly, you will typically only act on frames where `inframe.Type == hb::FrameType::Data`. The other
+frame types are control frames, and those are described in detail below.
+
+If this is a data frame, then the InFrame::IsHeader tells you that the frame
 is the first frame of a request. You are guaranteed here to have access to all of the HTTP headers, but
 not all of the body. Whether or not you act on the request at this stage will depend on whether you need
 to wait for the entire body or not. For example, if this is a file upload, then you may want to start
@@ -107,28 +111,28 @@ immediately, because you do not need to wait for the body to be sent, because th
 scenario is a POST request that includes a small body. Instead of acting on the first frame, you instead
 wait for the last frame, and send a response on that. The IsLast flag on a frame tells you whether this
 is the last frame for a request. It is common for IsFirst and IsLast to both be set on a frame, if the entire
-request consists of just one frame (or if the server has buffered up the request for you). There is also one
-other flag: IsAborted. This tells you that the client has disconnected this request, so you should abandon
-whatever work you were busy doing with this request. You must not send a response to an aborted request.
-For all other requests, you must send a response.
+request consists of just one frame (or if the server has buffered up the request for you).
+
+Unless a stream has been aborted, you must send a response for every request.
 
 #### Sending a response
 Most responses are sent with a single Response object, which includes the entire body of the response.
 However, there are cases where it makes sense to split the response into multiple frames (for example
-a file download). In order to send a response over multiple frames, make sure that the initial Response
-has a Content-Length header field set. Thereafter, use Backend.SendBodyPart() repeatedly to stream out the rest
-of the response body. Or equivalently, use Response::MakeBodyPart() and send that Response object.
-When the last byte has been sent, the request object will be deleted. An implication
-of this mechanism is that you cannot stream a result without specifying it's size up front (via the
-Content-Length header).
+a file download). In order to send a response over multiple frames, set the Content-Length header field
+(you can use Response::AddHeader_ContentLength to do this). If you don't know the size of the response,
+then set the Content-Length to -1. This signals to the server that this is a chunked response.
+To send body frames, call Backend.SendBodyPart() repeatedly, until the last frame is sent. You can also
+use Response::MakeBodyPart(). When sending your final frame, you must set the last parameter "isFinal = true",
+when calling SendBodyPart or MakeBodyPart.
 
 #### Threads
 You must poll Backend from a single thread. The same thread that calls Connect() must also call
 Recv(). This is merely a sanity check, but httpbridge will panic if this is violated. The intended
 threading model is that you create as many worker threads as you need, and you farm requests
 out to them. As soon as a worker thread is finished with a request, it calls Backend->Send(),
-or the equivalent Response->Send(). However, you don't need to run multiple threads - it is perfectly
-fine to run just one thread.
+or the equivalent Response->Send(). You don't need to run multiple threads, but it is better to
+have a dedicated thread that is calling Recv() continually, so that you can be informed by the
+backend of control frames (ie Pause, Resume, Abort).
 
 The functions on Backend that deal with a request/response are all callable from
 multiple threads. The exact list of functions that are safe to call from multiple threads is:
@@ -155,14 +159,41 @@ a client disconnecting. If you receive an Abort frame, then you should perform n
 processing on that stream. Any response that you send to an aborted stream will be discarded.
 
 A Pause frame is sent by the server when the TCP send buffer to the client is full.
-The backend must not send any more response body frames until it receives a subsequent
+The backend must not send any more response frames until it receives a subsequent
 Resume frame for that stream.
 
-## TODO
-* Add a test where a long upload is in progress, and the client disconnects, leaving the backend
-to handle an ABORT frame.
-* Add a test where a backend is transmitting a large response body, and the client disconnects,
-leaving the backend to handle an ABORT frame.
-* Add a test where a backend is transmitting a large response body, and the backend decides
-to stop, so it sends an ABORT frame to the server.
-* We already have a test where the backend aborts a long upload. This is TestServerOutOfMemory_Late
+When hb::Backend receives a control frame, it changes the state of the Request object,
+and you can get that state at any time by calling Request::State(). In addition to changing
+the state, Backend::Recv() will also return a frame with the relevant control message
+inside InFrame::Type. Depending on your threading model, you may want to respond
+immediately to control frames that are emitted by Recv(). Alternatively, you can poll
+Request::State() to detect changes.
+
+## Backpressure
+httpbridge uses a single TCP socket between the server and the backend. This is obviously
+more efficient than a TCP socket per client connection, but it also has a downside,
+in that a slow client has the potential to cause our single socket to block.
+
+How exactly can this happen?
+
+The Go httpbridge server has a single loop that fetches frames from the backend's TCP socket,
+repackages them as HTTP frames, and sends them over Go's HTTP server infrastructure.
+Because there is just one thread doing this work, it is possible for this thread to block,
+if one of the clients is receiving data slowly. For example, imagine you have ten concurrent
+downloads, and nine of them are on fiber optic lines, but one of them is on a 56K modem. The 
+TCP send buffer for the modem client will fill up soon, and so OS writes into that buffer
+will block until the buffer has free space inside it. This has a knock-on effect, causing
+the single thread that reads from the backend, to block also. Now, packets aren't being
+fetched and dispatched for the 9 fast clients, so the one slow reader is causing all others
+to stop. Obviously this is not acceptable.
+
+Our solution, is to use a buffered channel in Go, for each client stream. When the length
+of a channel's queue rises to a certain high threshold, we send a Pause frame to the backend,
+telling is to stop sending data for that stream. The backend continue to send data for
+streams that still have capacity. Over time, the channel queue of the paused stream
+will drain, and once it reaches a low threshold, we send a Resume frame to the backend,
+and it starts sending more frames.
+
+
+
+

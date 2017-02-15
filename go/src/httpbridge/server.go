@@ -36,7 +36,9 @@ const frameBaseSize = 100
 // and it can rely instead on the backend to automatically buffer up some amount of transmit data,
 // for paused streams. Increasing the buffer size here is definitely not an ideal thing to do, because
 // it adds more memory pressure to the single load balancer process.
-const responseChanBufferSize = 20
+// We make this number large - much larger than responseChanBufferHigh - because once a channel
+// is full, we are totally hosed.
+const responseChanBufferSize = 200
 
 // When the queue length of a response channel reaches this number, we send a PAUSE frame to the backend.
 const responseChanBufferHigh = 15
@@ -257,13 +259,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 			// The only case where we expect this is when the backend decides that the request is taking
 			// too much memory/space. For example, a chunked upload that ends up being too large.
 			s.Log.Infof("httpbridge request %v:%v aborted prematurely", channel, stream)
-			go func() {
-				// We need to fire up another goroutine to resend the response frame, otherwise it's possible
-				// for us to block here, if the response channel is full.
-				// TODO: no longer true, since adding buffering. The backend can only have sent a premature
-				// response, and that is only one frame, so the response buffer can't be full yet.
-				streamInfo.rchan <- responseFrame
-			}()
+			// Put the frame back into the queue, and let sendResponse send it.
+			streamInfo.rchan <- responseFrame
 		case sendBodyResult_ServerStop:
 			sendResponse = false
 		}
@@ -424,6 +421,7 @@ func (s *Server) sendControlFrame(frameType int8, channel, stream uint64, backen
 }
 
 func (s *Server) abortStream(channel, stream uint64, info *streamInfo, backend *backendConnection) {
+	s.Log.Infof("httpbridge aborting stream %v:%v on backend %v", channel, stream, backend.id)
 	info.setState(streamStateAborted)
 	s.sendControlFrame(TxFrameTypeAbort, channel, stream, backend)
 }
@@ -551,9 +549,9 @@ func (s *Server) sendResponseFrame(w http.ResponseWriter, req *http.Request, bac
 			valStr := string(val)
 			if keyStr == "Content-Length" && valStr == "-1" {
 				// Don't write our special chunked Content-Length value of -1 to the client
-				s.Log.Debugf("HB response is chunked")
+				//s.Log.Debugf("HB response is chunked")
 			} else {
-				s.Log.Debugf("HB sending header (%v)=(%v)", keyStr, valStr)
+				//s.Log.Debugf("HB sending header (%v)=(%v)", keyStr, valStr)
 				w.Header().Set(keyStr, valStr)
 			}
 		}
@@ -564,7 +562,8 @@ func (s *Server) sendResponseFrame(w http.ResponseWriter, req *http.Request, bac
 	for start := 0; start != len(body); {
 		written, err := w.Write(body[start:])
 		if err != nil {
-			s.Log.Errorf("httpbridge error writing body: %v:%v %v", channel, stream, err)
+			// This is typically hit when the client closes the connection before receiving the entire response
+			s.Log.Infof("httpbridge error writing body: %v:%v %v", channel, stream, err)
 			return err
 		}
 		s.Log.Debugf("HB Wrote %v body bytes", written)
@@ -629,7 +628,7 @@ func (s *Server) handleBackendConnection(backend *backendConnection) {
 	// the first 8 bytes of the next frame, in order to get rid of that tiny 8 byte read.
 
 	s.addBackend(backend)
-	s.Log.Infof("New httpbridge backend connection on port %v. ID: %v", s.BackendPort, backend.id)
+	s.Log.Infof("httpbridge New backend connection on port %v. ID: %v", s.BackendPort, backend.id)
 	var err error
 	buf := make([]byte, 1024)
 	bufSize := 0 // distinct from len(buf). bufSize is how many bytes we've actually read.
@@ -643,12 +642,12 @@ func (s *Server) handleBackendConnection(backend *backendConnection) {
 			magic := binary.LittleEndian.Uint32(buf[0:4])
 			frameSize = int(binary.LittleEndian.Uint32(buf[4:8]))
 			if magic != magicFrameMarker {
-				s.Log.Errorf("Backend %v sent invalid frame #%v. First two dwords: %x %x", backend.id, nFrames, magic, frameSize)
+				s.Log.Errorf("httpbridge Backend %v sent invalid frame #%v. First two dwords: %x %x", backend.id, nFrames, magic, frameSize)
 				break
 			}
 			if frameSize > 100*1024*1024 && !sentLargeFrameWarning {
 				sentLargeFrameWarning = true
-				s.Log.Warnf("Backend %v sent very large frame #%v. First two dwords: %x %x", backend.id, nFrames, magic, frameSize)
+				s.Log.Warnf("httpbridge Backend %v sent very large frame #%v. First two dwords: %x %x", backend.id, nFrames, magic, frameSize)
 			}
 			maxBufSize = frameSize + 16
 			//fmt.Printf("Have a valid frame %x %x\n", magic, frameSize)
@@ -659,7 +658,7 @@ func (s *Server) handleBackendConnection(backend *backendConnection) {
 		// Check if we need to grow buf
 		if len(buf) < maxBufSize {
 			if maxBufSize >= 50*1024*1024 {
-				s.Log.Warnf("Warning: frame from backend %v is %v MB", backend.id, maxBufSize/(1024*1024))
+				s.Log.Warnf("httpbridge frame from backend %v is %v MB", backend.id, maxBufSize/(1024*1024))
 			}
 			oldBuf := buf
 			buf = make([]byte, maxBufSize)
@@ -685,14 +684,22 @@ func (s *Server) handleBackendConnection(backend *backendConnection) {
 				copy(extraBytes[:], buf[8+frameSize:bufSize])
 			}
 
-			//frame := GetRootAsTxFrame(buf[8:bufSize], 0) //  BAAAAAAAAAAAAD
-			frame := GetRootAsTxFrame(buf[8:8+frameSize], 0) /// GOOOOOOOOOOOOOD
-			info := s.findStreamInfo(frame.Channel(), frame.Stream())
+			frame := GetRootAsTxFrame(buf[8:8+frameSize], 0)
+			info := s.findStreamInfo(frame.Channel(), frame.Stream(), backend)
 			if info != nil {
 				s.Log.Debugf("HB Sending frame to chan")
 				state := info.getState()
 				if state != streamStateAborted {
+					isFull := len(info.rchan) == responseChanBufferSize
+					if isFull {
+						// I initially thought that I could have a fallback path here, by sending the frame from a different goroutine,
+						// but that doesn't work because now your frames are arriving out of order!
+						s.Log.Warnf("httpbridge response channel %v:%v is full for backend %v", frame.Channel(), frame.Stream(), backend.id)
+					}
 					info.rchan <- frame
+					if isFull {
+						s.Log.Warnf("httpbridge finished sending frame to full response channel %v:%v, for backend %v", frame.Channel(), frame.Stream(), backend.id)
+					}
 				}
 				if state == streamStateActive && len(info.rchan) >= responseChanBufferHigh && enablePause {
 					// Pause
@@ -791,13 +798,14 @@ func (s *Server) unregisterStream(channel, stream uint64) {
 	s.responsesLock.Unlock()
 }
 
-func (s *Server) findStreamInfo(channel, stream uint64) *streamInfo {
+func (s *Server) findStreamInfo(channel, stream uint64, backend *backendConnection) *streamInfo {
 	s.responsesLock.Lock()
 	defer s.responsesLock.Unlock()
 	sid := makeStreamID(channel, stream)
 	info, ok := s.responses[sid]
 	if !ok {
-		s.Log.Warnf("httpbridge findStreamInfo failed. Backend may have timed out (channel %v, stream %v)", channel, stream)
+		// This happens if a stream has been aborted, but the backend hasn't noticed that yet
+		s.Log.Infof("httpbridge findStreamInfo failed %v:%v for backend %v", channel, stream, backend.id)
 		return nil
 	}
 	return info

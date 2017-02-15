@@ -2,6 +2,7 @@ package httpbridge
 
 import (
 	"bytes"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -10,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -29,6 +31,7 @@ var cpp_server_err *bytes.Buffer
 var front_server *Server
 var pingClient http.Client
 var requestClient http.Client
+var slowReaderSuicide = errors.New("Slow reader suicide")
 
 // This is useful when you want to launch test-backend.exe from the C++ debugger
 // go test httpbridge -external_backend
@@ -193,6 +196,7 @@ type slowReader struct {
 	chunkMaxSize  int
 	chunkInterval time.Duration
 	totalRead     int
+	errorAt       int
 }
 
 type slowReaderFull struct {
@@ -200,6 +204,9 @@ type slowReaderFull struct {
 }
 
 func (s *slowReader) Read(p []byte) (int, error) {
+	if s.errorAt != 0 && s.totalRead >= s.errorAt {
+		return 0, slowReaderSuicide
+	}
 	sleep_for := s.lastTime.Add(s.chunkInterval).Sub(time.Now())
 	if sleep_for > 0 {
 		time.Sleep(sleep_for)
@@ -315,10 +322,18 @@ func testRequest(t *testing.T, method string, url string, bodyLen int, body io.R
 		t.Fatalf("%v: Error reading response body: %v", url, err)
 	}
 	if resp.StatusCode != expectCode {
-		t.Errorf("%v:\nexpected code (%v)\nreceived code (%v)", url, expectCode, resp.StatusCode)
+		t.Fatalf("%v:\nexpected code (%v)\nreceived code (%v)", url, expectCode, resp.StatusCode)
 	}
 	if expectBody != BodyDontCare && respBody != expectBody {
-		t.Errorf("%v:\nexpected (%v)\nreceived (%v)", url, expectBody, respBody)
+		n1 := 100
+		if len(expectBody) < n1 {
+			n1 = len(expectBody)
+		}
+		n2 := 100
+		if len(respBody) < n2 {
+			n2 = len(respBody)
+		}
+		t.Fatalf("%v:\nexpected %v(%v)\nreceived %v(%v)", url, len(expectBody), expectBody[:n1], len(respBody), respBody[:n2])
 	}
 }
 
@@ -352,11 +367,12 @@ func generateBuf(numBytes int) string {
 	return string(buf)
 }
 
-func withCombinations(t *testing.T, f func()) {
+func withCombinations(t *testing.T, f func(title string)) {
 	testGet(t, "/control?MaxAutoBufferSize=50000000", 200, "")
-	f()
+	f("MaxAutoBufferSize=50000000")
+
 	testGet(t, "/control?MaxAutoBufferSize=0", 200, "")
-	f()
+	f("MaxAutoBufferSize=0")
 }
 
 func TestMain(m *testing.M) {
@@ -378,10 +394,12 @@ func TestHelloWorld(t *testing.T) {
 
 func TestEcho(t *testing.T) {
 	restart(t)
-	withCombinations(t, func() {
+
+	withCombinations(t, func(title string) {
 		for singleResponseFrame := 0; singleResponseFrame < 2; singleResponseFrame++ {
 			maxResponseSize := singleResponseFrame * 4000 // 0 = disabled (ie no limit on frame size)
 			url := fmt.Sprintf("/echo?MaxTransmitBodyChunkSize=%v", maxResponseSize)
+			t.Logf("Mode: %v. URL: %v\n", title, url)
 
 			testPost(t, url, "Hello!", 200, "Hello!")
 
@@ -398,6 +416,12 @@ func TestChunkedRequest(t *testing.T) {
 	restart(t)
 	buf := generateBuf(3 * 1024 * 1024)
 	testPostBodyReader(t, "/echo", -1, &dumbReader{bytes.NewReader([]byte(buf))}, 200, buf)
+}
+
+func TestChunkedResponse(t *testing.T) {
+	restart(t)
+	buf := generateBuf(3 * 1024 * 1024)
+	testPostBodyReader(t, "/echo?NoContentLength=1", -1, bytes.NewReader([]byte(buf)), 200, buf)
 }
 
 func TestTooLongURI(t *testing.T) {
@@ -542,7 +566,7 @@ func TestThroughputSlow(t *testing.T) {
 		MB per second: 237.031 (79.0%) (expected 300, 2 connections)
 		MB per second: 235.924 (78.6%) (expected 300, 2 connections)
 
-	Then, in server.go, set enablePause = false, and run the same test again, and you should see:
+	Then, in server.go, set enablePause = false, and enableFallbackForFullChannels = false, and run the same test again, and you should see:
 
 		MB per second: 3.069 (1.0%) (expected 300, 2 connections)
 		MB per second: 0.191 (0.1%) (expected 300, 2 connections)
@@ -566,6 +590,10 @@ func TestThroughputSlow(t *testing.T) {
 func TestThroughputManySmall(t *testing.T) {
 	// On my Sandy Bridge 2600K, I get about 300 MB/s. Peak observed: 343
 	testThroughputWith(t, 300, 300*1024*1024, false)
+}
+
+func TestThroughputFewBig(t *testing.T) {
+	testThroughputWith(t, 3, 300*1024*1024, false)
 }
 
 func TestTimeout(t *testing.T) {
@@ -596,4 +624,52 @@ func TestThreadedBackend(t *testing.T) {
 	for i := 0; i < nthreads; i++ {
 		<-done
 	}
+}
+
+func TestAbortedRequest(t *testing.T) {
+	restart(t)
+
+	// Start a slow upload, which we abort midway
+	// We can't really test this well from the Go side - it's really here to stress the C++
+	// backend code, to make sure that it handles aborts correctly.
+	// When developing this, I would place some breakpoints and printf's inside the
+	// C++ code to sense-check it.
+	bpc := 10000
+	body := generateBuf(5 * 1024 * 1024)
+	slow := newSlowReader(bytes.NewReader([]byte(body)), 100*time.Millisecond, bpc)
+	slow.errorAt = bpc * 2
+	wait := make(chan bool)
+	go func() {
+		req, _ := http.NewRequest("GET", baseUrl+"/echo", slow)
+		req.ContentLength = int64(len(body))
+		_, err := requestClient.Do(req)
+		if strings.Index(err.Error(), "suicide") == -1 {
+			t.Errorf("Expected error containing %v", slowReaderSuicide.Error())
+		}
+		// Give the backend some time to receive the abort frame
+		time.Sleep(10 * time.Millisecond)
+		wait <- true
+	}()
+
+	<-wait
+}
+
+// Client abandons download
+func TestAbortedResponseFromClient(t *testing.T) {
+	restart(t)
+	wait := make(chan bool)
+	go func() {
+		// keep this size below the auto-buffered size, for the echo-thread's sake
+		body := generateBuf(10 * 1024 * 1024)
+		req, _ := http.NewRequest("GET", baseUrl+"/echo-thread?MaxTransmitBodyChunkSize=65536", bytes.NewReader([]byte(body)))
+		resp, err := requestClient.Do(req)
+		if err != nil {
+			t.Errorf("Expected success\n")
+		}
+		// Close the body early
+		resp.Body.Close()
+		wait <- true
+	}()
+
+	<-wait
 }

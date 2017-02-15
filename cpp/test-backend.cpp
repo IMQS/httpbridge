@@ -140,6 +140,7 @@ private:
 	{
 		hb::Buffer	Body;
 		size_t		MaxTransmitBodyChunkSize = 0;
+		bool		NoContentLength = false;
 	};
 	std::unordered_map<RequestKey, LocalRequest*>	Requests;
 	std::vector<std::thread>						Threads;
@@ -160,8 +161,8 @@ private:
 	// Echos the body back
 	void HttpEcho(hb::InFrame& inframe, LocalRequest* lr)
 	{
-		if (inframe.IsHeader && inframe.Request->Query("MaxTransmitBodyChunkSize") != nullptr)
-			lr->MaxTransmitBodyChunkSize = atoi(inframe.Request->Query("MaxTransmitBodyChunkSize"));
+		lr->MaxTransmitBodyChunkSize = (size_t) inframe.Request->QueryInt64("MaxTransmitBodyChunkSize");
+		lr->NoContentLength = inframe.Request->QueryInt64("NoContentLength") == 1;
 
 		if (!inframe.Request->IsBuffered)
 			lr->Body.Write(inframe.BodyBytes, inframe.BodyBytesLen);
@@ -169,7 +170,7 @@ private:
 		if (inframe.IsLast)
 		{
 			const hb::Buffer& body = inframe.Request->IsBuffered ? inframe.Request->BodyBuffer : lr->Body;
-			SendResponseInChunks(inframe.Request, hb::Status200_OK, body.Data, body.Count, lr->MaxTransmitBodyChunkSize);
+			SendResponseInChunks(inframe.Request, hb::Status200_OK, body.Data, body.Count, lr->MaxTransmitBodyChunkSize, !lr->NoContentLength);
 		}
 	}
 
@@ -199,10 +200,20 @@ private:
 		Requests.erase(key);
 	}
 
-	static void SendResponseInChunks(hb::ConstRequestPtr request, hb::StatusCode status, const void* body, size_t bodyLen, size_t maxBodyChunkSize)
+	static void SendResponseInChunks(hb::ConstRequestPtr request, hb::StatusCode status, const void* body, size_t bodyLen, size_t maxBodyChunkSize, bool sendContentLength)
 	{
 		hb::Response head(request, status);
-		head.AddHeader_ContentLength(bodyLen);
+		if (sendContentLength)
+		{
+			head.AddHeader_ContentLength(bodyLen);
+		}
+		else
+		{
+			head.AddHeader_ContentLength(-1);
+			if (bodyLen == 0)
+				head.IsFinalChunkedFrame = true;
+		}
+
 		auto res = head.Send();
 		if (res != hb::SendResult_All)
 			printf("Send head failed!\n");
@@ -210,16 +221,31 @@ private:
 		size_t bodyPos = 0;
 		while (bodyPos < bodyLen)
 		{
-			size_t chunk = bodyLen;
-			if (maxBodyChunkSize != 0)
-				chunk = std::min(maxBodyChunkSize, bodyLen - bodyPos);
-			res = request->Backend->SendBodyPart(request, (uint8_t*) body + bodyPos, chunk);
-			if (res == hb::SendResult_All)
-				bodyPos += chunk;
-			else if (res == hb::SendResult_Closed)
-				printf("Backend closed\n");			// We should stress this path in tests
+			// These abort or paused paths will not get hit if we're running single-threaded, and never doing any Recv calls.
+			// In other words, use this from /echo-thread
+			if (request->State() == hb::StreamState::Aborted)
+			{
+				printf("Stream aborted\n");
+				break;
+			}
+			else if (request->State() == hb::StreamState::Paused)
+			{
+				hb::SleepNano(20 * 1000 * 1000); // 20 ms
+			}
 			else
-				printf("SendResponse failed unexpectedly\n");
+			{
+				size_t chunk = bodyLen;
+				if (maxBodyChunkSize != 0)
+					chunk = std::min(maxBodyChunkSize, bodyLen - bodyPos);
+				bool isFinal = bodyPos + chunk == bodyLen;
+				res = request->Backend->SendBodyPart(request, (uint8_t*) body + bodyPos, chunk, isFinal);
+				if (res == hb::SendResult_All)
+					bodyPos += chunk;
+				else if (res == hb::SendResult_Closed)
+					printf("Backend closed\n");			// We should stress this path in tests
+				else
+					printf("SendResponse failed unexpectedly\n");
+			}
 		}
 	}
 
@@ -281,7 +307,7 @@ private:
 				size_t chunkSize = std::min(bufSize, q->Remaining);
 				//for (uint32_t i = 0; i < chunkSize; i++)
 				//	buf[i] = (uint8_t) (q->Remaining - i);
-				auto res = hb::Response::MakeBodyPart(q->Request, buf, chunkSize).Send();
+				auto res = hb::Response::MakeBodyPart(q->Request, buf, chunkSize, false).Send();
 				if (res == hb::SendResult_Closed)
 					return;
 				q->Remaining -= chunkSize;
@@ -338,9 +364,12 @@ private:
 			{
 				if (req->Path() == "/echo-thread")
 				{
-					// Echos the body back
-					//if (tick % 4 != 0)
-					if (true)
+					size_t chunkSize = 0;
+					if (req->Query("MaxTransmitBodyChunkSize") != nullptr)
+						chunkSize = (size_t) req->QueryInt64("MaxTransmitBodyChunkSize");
+					bool noContentLength = req->QueryInt64("NoContentLength") == 1;
+
+					if (chunkSize == 0)
 					{
 						// send response as single frame
 						hb::Response resp(req);
@@ -349,15 +378,7 @@ private:
 					}
 					else
 					{
-						// split response over two frames
-						hb::Response r1(req);
-						int half = (int) req->BodyBuffer.Count / 2;
-						r1.AddHeader_ContentLength(req->BodyBuffer.Count);
-						r1.SetBody(req->BodyBuffer.Data, half);
-						r1.Send();
-						hb::SleepNano(50 * 1000);
-						auto r2 = hb::Response::MakeBodyPart(req, req->BodyBuffer.Data + half, req->BodyBuffer.Count - half);
-						r2.Send();
+						SendResponseInChunks(req, hb::Status200_OK, req->BodyBuffer.Data, req->BodyBuffer.Count, chunkSize, !noContentLength);
 					}
 				}
 				else if (req->Path() == "/garbage-stream")
@@ -371,7 +392,7 @@ private:
 					while (remain != 0)
 					{
 						size_t chunk = std::min((size_t) 8192, remain);
-						hb::Response::MakeBodyPart(req, buf, chunk).Send();
+						hb::Response::MakeBodyPart(req, buf, chunk, false).Send();
 						remain -= chunk;
 					}
 				}

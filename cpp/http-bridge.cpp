@@ -989,6 +989,7 @@ namespace hb
 		RequestState* rs = GetRequest(response.Channel, response.Stream);
 		if (!rs)
 		{
+			// The stream has been closed. A typical thing that causes this is an aborted stream.
 			CurrentRequestLock.unlock();
 			return SendResult_Closed;
 		}
@@ -1054,11 +1055,12 @@ namespace hb
 		return Send(response);
 	}
 
-	SendResult Backend::SendBodyPart(ConstRequestPtr request, const void* body, size_t len)
+	SendResult Backend::SendBodyPart(ConstRequestPtr request, const void* body, size_t len, bool isFinal)
 	{
 		Response response(request, Status200_OK);
 		response.SetBody(body, len);
 		response.Status = StatusMeta_BodyPart;
+		response.IsFinalChunkedFrame = isFinal;
 		return Send(response);
 	}
 
@@ -1099,9 +1101,8 @@ namespace hb
 			CurrentRequests[streamKey] = {frame.Request, ResponseBodyUninitialized, false};
 			CurrentRequestLock.unlock();
 
-			if (frame.Request->ContentLength == 0)
+			if (frame.IsLast && frame.Request->ContentLength != -1 && frame.Request->ContentLength != 0)
 			{
-				HTTPBRIDGE_ASSERT(frame.IsLast);
 				frame.Request->IsBuffered = true;
 				frame.Request->BodyBuffer.Data = frame.BodyBytes;
 				frame.Request->BodyBuffer.Capacity = frame.BodyBytesLen;
@@ -1110,7 +1111,7 @@ namespace hb
 				return true;
 			}
 
-			if (frame.Request->ContentLength != -1 && frame.Request->ContentLength <= MaxAutoBufferSize) // from pieter: && !frame.IsLast)
+			if (frame.Request->ContentLength != -1 && frame.Request->ContentLength <= MaxAutoBufferSize && !frame.IsLast)
 			{
 				// Automatically place requests into the 'ResendWhenBodyIsDone' queue
 				if (ResendWhenBodyIsDone(frame))
@@ -1131,12 +1132,6 @@ namespace hb
 
 		if (!frame.IsHeader || frame.IsLast || request->ContentLength == 0 || request->ContentLength == -1)
 			LogAndPanic("ResendWhenBodyIsDone may only be called on the first frame of a request (the header frame), with a positive body length");
-
-		CurrentRequestLock.lock();
-		StreamKey key = MakeStreamKey(request);
-		if (CurrentRequests.find(key) == CurrentRequests.end())
-			LogAndPanic("ResendWhenBodyIsDone called on an unknown request");
-		CurrentRequestLock.unlock();
 
 		size_t initialSize = min(InitialBufferSize.load(), (size_t) request->ContentLength);
 		initialSize = max(initialSize, frame.BodyBytesLen);
@@ -1174,18 +1169,21 @@ namespace hb
 		CurrentRequestLock.lock();
 		auto cr = CurrentRequests.find(key);
 		HTTPBRIDGE_ASSERT(cr != CurrentRequests.end());
-		ConstRequestPtr request = cr->second.Request;
-
-		if (request->IsBuffered)
-		{
-			if (BufferedRequestsTotalBytes < request->BodyBuffer.Capacity)
-				LogAndPanic("BufferedRequestsTotalBytes underflow");
-			BufferedRequestsTotalBytes -= (size_t) request->BodyBuffer.Capacity;
-		}
+		
+		// Initially, I would call UnregisterBufferedBytes here, but that introduces a race condition
+		// inside ResendWhenBodyIsDone, if the frame is aborted during the execution of ResendWhenBodyIsDone.
+		// So instead, Request's destructor now calls UnregisterBufferedBytes.
 
 		cr->second.Request = nullptr; // ensure that smart_ptr reference is decremented now
 		CurrentRequests.erase(key);
 		CurrentRequestLock.unlock();
+	}
+
+	void Backend::UnregisterBufferedBytes(size_t bytes)
+	{
+		if (BufferedRequestsTotalBytes < bytes)
+			LogAndPanic("BufferedRequestsTotalBytes underflow");
+		BufferedRequestsTotalBytes -= bytes;
 	}
 
 	static bool IsControlFrame(httpbridge::TxFrameType type)
@@ -1373,7 +1371,7 @@ namespace hb
 		if (inframe.Request == nullptr)
 		{
 			CurrentRequestLock.lock();
-			auto cr = CurrentRequests.find(MakeStreamKey(txframe->channel(), txframe->stream()));
+			auto cr = CurrentRequests.find(MakeStreamKey(txframe));
 			if (cr == CurrentRequests.end())
 			{
 				flatbuffers::uoffset_t bodySize = 0;
@@ -1397,7 +1395,7 @@ namespace hb
 			Buffer& buf = inframe.Request->BodyBuffer;
 			if (buf.Count + inframe.BodyBytesLen > inframe.Request->ContentLength)
 			{
-				AnyLog()->Logf("Request sent too many body bytes. Ignoring frame [%llu:%llu] and aborting stream", txframe->channel(), txframe->stream());
+				AnyLog()->Logf("Request sent too many body bytes. Ignoring frame [%llu:%llu] and ending stream", txframe->channel(), txframe->stream());
 				return FrameStatus::BodyLongerThanContentLength;
 			}
 			// Check to see if we're going to exceed MaxWaitingBufferTotal.
@@ -1437,7 +1435,7 @@ namespace hb
 		if (inframe.Request == nullptr)
 		{
 			CurrentRequestLock.lock();
-			auto cr = CurrentRequests.find(MakeStreamKey(txframe->channel(), txframe->stream()));
+			auto cr = CurrentRequests.find(MakeStreamKey(txframe));
 			if (cr == CurrentRequests.end())
 			{
 				AnyLog()->Logf("Received control frame '%s' for unknown stream [%llu:%llu]", httpbridge::EnumNameTxFrameType(txframe->frametype()), txframe->channel(), txframe->stream());
@@ -1448,9 +1446,16 @@ namespace hb
 			CurrentRequestLock.unlock();
 			switch (inframe.Type)
 			{
-			case FrameType::Abort: inframe.Request->SetState(StreamState::Aborted); break;
-			case FrameType::Pause: inframe.Request->SetState(StreamState::Paused); break;
-			case FrameType::Resume: inframe.Request->SetState(StreamState::Active); break;
+			case FrameType::Abort:
+				RequestFinished(MakeStreamKey(txframe));
+				inframe.Request->SetState(StreamState::Aborted);
+				break;
+			case FrameType::Pause:
+				inframe.Request->SetState(StreamState::Paused);
+				break;
+			case FrameType::Resume:
+				inframe.Request->SetState(StreamState::Active);
+				break;
 			default:
 				HTTPBRIDGE_PANIC("Unexpected control frame type");
 			}
@@ -1529,6 +1534,11 @@ namespace hb
 	StreamKey Backend::MakeStreamKey(ConstRequestPtr request)
 	{
 		return StreamKey{ request->Channel, request->Stream };
+	}
+
+	StreamKey Backend::MakeStreamKey(const httpbridge::TxFrame* txframe)
+	{
+		return StreamKey{ txframe->channel(), txframe->stream() };
 	}
 
 	//////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -1693,6 +1703,9 @@ namespace hb
 
 	Request::~Request()
 	{
+		if (Backend && IsBuffered)
+			Backend->UnregisterBufferedBytes(BodyBuffer.Capacity);
+
 		hb::Free(_CachedURI);
 		hb::Free((void*) _HeaderBlock);
 	}
@@ -1989,11 +2002,12 @@ namespace hb
 		return *this;
 	}
 
-	Response Response::MakeBodyPart(ConstRequestPtr request, const void* part, size_t len)
+	Response Response::MakeBodyPart(ConstRequestPtr request, const void* part, size_t len, bool isFinal)
 	{
 		Response r(request);
 		r.SetBodyInternal(part, len);
 		r.Status = StatusMeta_BodyPart;
+		r.IsFinalChunkedFrame = isFinal;
 		return r;
 	}
 
