@@ -361,14 +361,17 @@ void Server::ReadFromBackend()
 	if (nread > 0)
 	{
 		BackendRecvBuf.Count += nread;
-		if (BackendRecvBuf.Count > 4)
+		if (BackendRecvBuf.Count > 8)
 		{
-			uint32_t frameSize = Read32LE(BackendRecvBuf.Data);
-			if (BackendRecvBuf.Count >= frameSize + 4)
+			uint32_t magic = Read32LE(BackendRecvBuf.Data);
+			if (magic != hb::MagicFrameMarker)
+				fprintf(Log, "[%d] backend sent invalid magic marker\n", (int) BackendSock);
+			uint32_t frameSize = Read32LE(BackendRecvBuf.Data + 4);
+			if (BackendRecvBuf.Count >= frameSize + 8)
 			{
 				// We have a frame
-				HandleBackendFrame(frameSize, BackendRecvBuf.Data + 4);
-				BackendRecvBuf.EraseFromStart(4 + frameSize);
+				HandleBackendFrame(frameSize, BackendRecvBuf.Data + 8);
+				BackendRecvBuf.EraseFromStart(8 + frameSize);
 			}
 		}
 	}
@@ -461,9 +464,13 @@ void Server::HandleBackendFrame(uint32_t frameSize, const void* frameBuf)
 bool Server::SendFlatbufferToSocket(flatbuffers::FlatBufferBuilder& fbb, Server::socket_t dest)
 {
 	// Add our frame size to the start of the flatbuffer
-	uint8_t frame_size[4];
-	Write32LE(frame_size, (uint32_t) fbb.GetSize());
-	fbb.PushBytes(frame_size, 4);
+	uint8_t b4[4];
+	Write32LE(b4, (uint32_t) fbb.GetSize());
+	fbb.PushBytes(b4, 4);
+
+	// Add our magic marker
+	Write32LE(b4, (uint32_t) hb::MagicFrameMarker);
+	fbb.PushBytes(b4, 4);
 
 	int sent = SendToSocket(dest, fbb.GetBufferPointer(), (int) fbb.GetSize());
 	return sent == fbb.GetSize();
