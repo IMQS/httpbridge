@@ -189,10 +189,15 @@ to stop. Obviously this is not acceptable.
 
 Our solution, is to use a buffered channel in Go, for each client stream. When the length
 of a channel's queue rises to a certain high threshold, we send a Pause frame to the backend,
-telling is to stop sending data for that stream. The backend continue to send data for
+telling is to stop sending data for that stream. The backend continues to send data for
 streams that still have capacity. Over time, the channel queue of the paused stream
 will drain, and once it reaches a low threshold, we send a Resume frame to the backend,
 and it starts sending more frames.
+
+This scheme is not bullet-proof. We are relying on timing here, to achieve a reasonable probability
+that the Pause frame will reach the backend in time, before it's channel is full. A better
+strategy would be for the server to send the backend a transmit window size, so that we
+can be guaranteed never to exceed the channel's buffer size.
 
 
 
