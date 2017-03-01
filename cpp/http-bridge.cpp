@@ -958,9 +958,12 @@ namespace hb
 
 	void Backend::Close()
 	{
+		CurrentRequestLock.lock();
 		CurrentRequests.clear();
+		CurrentRequestLock.unlock();
 
-		HTTPBRIDGE_ASSERT(BufferedRequestsTotalBytes == 0);
+		if (BufferedRequestsTotalBytes.load() != 0)
+			AnyLog()->Logf("BufferedRequestsTotalBytes is %llu, instead of zero", (int64_t) BufferedRequestsTotalBytes.load());
 
 		delete Transport;
 		Transport = nullptr;
@@ -2294,8 +2297,8 @@ namespace hb
 
 	void Response::Free()
 	{
-		if (FBB != nullptr)
-			delete FBB;
+		delete FBB;
+		FBB = nullptr;
 		HeaderIndex.Clear();
 		HeaderBuf.Clear();
 		Backend = nullptr;

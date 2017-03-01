@@ -125,6 +125,9 @@ HTTPBRIDGE_API HTTPBRIDGE_NORETURN_PREFIX void BuiltinTrap() HTTPBRIDGE_NORETURN
 
 	enum StatusCode
 	{
+		StatusMeta_BodyPart = 1000,	// Used in a Response message to indicate that this is a body part that is being transmitted
+		Status000_NULL = 0,			// Used where a NULL value is required
+
 		Status100_Continue = 100,
 		Status101_Switching_Protocols = 101,
 		Status102_Processing = 102,
@@ -187,8 +190,6 @@ HTTPBRIDGE_API HTTPBRIDGE_NORETURN_PREFIX void BuiltinTrap() HTTPBRIDGE_NORETURN
 		Status509_Unassigned = 509,
 		Status510_Not_Extended = 510,
 		Status511_Network_Authentication_Required = 511,
-		StatusMeta_BodyPart = 1000,	// Used in a Response message to indicate that this is a body part that is being transmitted
-		Status000_NULL = 0,			// Used where a NULL value is required
 	};
 
 	extern const char* Header_Content_Length;
