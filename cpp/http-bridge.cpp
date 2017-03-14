@@ -963,7 +963,7 @@ namespace hb
 		CurrentRequestLock.unlock();
 
 		if (BufferedRequestsTotalBytes.load() != 0)
-			AnyLog()->Logf("BufferedRequestsTotalBytes is %llu, instead of zero", (int64_t) BufferedRequestsTotalBytes.load());
+			AnyLog()->Logf("BufferedRequestsTotalBytes is %llu, instead of zero", (uint64_t) BufferedRequestsTotalBytes.load());
 
 		delete Transport;
 		Transport = nullptr;
