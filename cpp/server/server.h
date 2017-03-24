@@ -23,6 +23,11 @@ class Server;
 
 /* A minimal HTTP/1.1 server.
 
+WARNING! There is a bug in this thing that causes requests to get queued up and then never finally
+dealt with. If you hit it with multiple threads, then you'll see that some of your requests just
+never end up completing. I abandoned this project before I bothered to fix that bug. The bug
+only seems to manifest when you are reusing a socket for multiple requests.
+
 This server is designed to be used by unit tests of HTTP services that run behind httpbridge.
 By incorporating a mini HTTP server into your application, you can make your C++ application
 self-contained, as least as far as testing many aspects of your HTTP/1.1 compatible interface
@@ -60,9 +65,9 @@ public:
 	{
 		socket_t		Socket = InvalidSocket;
 		void*			Parser = nullptr;
-		hb::Request		Request;
 		uint64_t		ChannelID = 0;
 		bool			IsHeaderFinished = false;
+		int64_t			RequestNum = 0;
 
 		// Details of the request
 		std::string		Method;

@@ -3,7 +3,7 @@ package main
 import (
 	"fmt"
 	"httpbridge"
-	// "github.com/bmharper/httpbridge/go/src/httpbridge"  --  How to include httpbridge from a regular project
+	// "github.com/IMQS/httpbridge/go/src/httpbridge"  --  How to include httpbridge from a regular project
 )
 
 func main() {

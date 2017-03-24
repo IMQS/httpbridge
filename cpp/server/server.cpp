@@ -170,8 +170,6 @@ void Server::cb_header_done(void *data, const char *at, size_t length)
 	index[ipos].KeyLen = 0;
 
 	HTTPBRIDGE_ASSERT(bufpos == total);
-
-	c->Request.Initialize(nullptr, c->Version, 0, 0, (int32_t) c->Headers.size() + 1, hblock);
 }
 
 // http_parser callbacks (end)
@@ -338,12 +336,13 @@ bool Server::ReadFromChannel(Channel& c)
 		// It is normal for IsHeaderFinished to be true immediately after it was false in the block above.
 		if (c.IsHeaderFinished)
 		{
+			bool ok = true;
 			size_t bodyLen = nread - consumedByHeader;
 			if (bodyLen != 0)
-			{
-				if (!HandleRequestBody(c, buf + consumedByHeader, (int) bodyLen))
-					return false;
-			}
+				ok = HandleRequestBody(c, buf + consumedByHeader, (int) bodyLen);
+			ResetChannel(c);
+			if (!ok)
+				return false;
 		}
 		return true;
 	}
@@ -361,7 +360,7 @@ void Server::ReadFromBackend()
 	if (nread > 0)
 	{
 		BackendRecvBuf.Count += nread;
-		if (BackendRecvBuf.Count > 8)
+		while (BackendRecvBuf.Count > 8)
 		{
 			uint32_t magic = Read32LE(BackendRecvBuf.Data);
 			if (magic != hb::MagicFrameMarker)
@@ -478,7 +477,8 @@ bool Server::SendFlatbufferToSocket(flatbuffers::FlatBufferBuilder& fbb, Server:
 
 bool Server::HandleRequestHead(Channel& c)
 {
-	fprintf(Log, "[%d] request [%s]\n", (int) c.Socket, c.URI.c_str());
+	fprintf(Log, "[%d] request [%s] (%d)\n", (int) c.Socket, c.URI.c_str(), (int) c.RequestNum);
+	c.RequestNum++;
 
 	using namespace httpbridge;
 
@@ -514,7 +514,9 @@ bool Server::HandleRequestBody(Channel& c, const void* buf, int len)
 	if (c.ContentReceived + len == c.ContentLength)
 		flags |= httpbridge::TxFrameFlags_Final;
 	uint64_t stream = 3;
-	auto body = fbb.CreateVector<uint8_t>((const uint8_t*) buf, len);
+	fbb.StartVector(len, 1);
+	fbb.PushBytes((const uint8_t*) buf, len);
+	auto body = fbb.EndVector(len);
 	auto root = CreateTxFrame(fbb, httpbridge::TxFrameType_Body, (httpbridge::TxHttpVersion) TranslateVersionToFlatBuffer(c.Version), flags, c.ChannelID, stream, 0, body);
 	FinishTxFrameBuffer(fbb, root);
 	c.ContentReceived += len;
@@ -528,8 +530,6 @@ void Server::ResetChannel(Channel& c)
 	c.ContentReceived = 0;
 	c.Headers.clear();
 	c.Method = "";
-	HTTPBRIDGE_PANIC("Implement Request.Reset");
-	//c.Request.Reset();
 	c.URI = "";
 	c.Version = hb::HttpVersion10;
 	c.IsHeaderFinished = false;
