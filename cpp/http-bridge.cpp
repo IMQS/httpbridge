@@ -505,6 +505,14 @@ namespace hb
 	//////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 	//////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
+	ICompressor::~ICompressor()
+	{
+	}
+
+	//////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+	//////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+	//////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
 	class TransportTCP : public ITransport
 	{
 	public:
@@ -1974,6 +1982,7 @@ namespace hb
 	Response::Response(ConstRequestPtr request, StatusCode status)
 	{
 		Status = status;
+		Request = request;
 		Backend = request->Backend;
 		Version = request->Version;
 		Channel = request->Channel;
@@ -2093,6 +2102,30 @@ namespace hb
 		// construct their code in such a manner that this is not necessary.
 		HTTPBRIDGE_ASSERT(BodyOffset == 0 && BodyLength == 0);
 
+		void* enc = nullptr;
+		size_t encLen = -1;
+
+		if (Request && Backend && Backend->Compressor)
+		{
+			// The following two conditions disable transparent compression:
+			// * Content-Encoding is set
+			// * Content-Length is set
+			const char* acceptEncoding = Request->HeaderByName("Accept-Encoding");
+			if (acceptEncoding && !HeaderByName("Content-Encoding") && !HeaderByName("Content-Length"))
+			{
+				char responseEncoding[ICompressor::ResponseEncodingBufferSize];
+				responseEncoding[0] = 0;
+				if (Backend->Compressor->Compress(acceptEncoding, body, len, enc, encLen, responseEncoding))
+				{
+					HTTPBRIDGE_ASSERT(responseEncoding[0] != 0);
+					responseEncoding[sizeof(responseEncoding) - 1] = 0;
+					AddHeader("Content-Encoding", responseEncoding);
+					body = enc;
+					len = encLen;
+				}
+			}
+		}
+
 		CreateBuilder();
 
 		FBB->NotNested();
@@ -2100,6 +2133,9 @@ namespace hb
 		FBB->PushBytes((const uint8_t*) body, len);
 		BodyOffset = (ByteVectorOffset) FBB->EndVector(len);
 		BodyLength = (uint32_t) len;
+
+		if (enc)
+			Backend->Compressor->Free(enc);
 	}
 
 	SendResult Response::Send()

@@ -231,6 +231,20 @@ HTTPBRIDGE_API HTTPBRIDGE_NORETURN_PREFIX void BuiltinTrap() HTTPBRIDGE_NORETURN
 		virtual RecvResult	Recv(size_t maxSize, void* data, size_t& bytesRead) = 0;
 	};
 
+	// Expose a compressor for compressing responses with gzip, deflate, etc.
+	class HTTPBRIDGE_API ICompressor
+	{
+	public:
+		static const int ResponseEncodingBufferSize = 60;
+		virtual ~ICompressor();
+		// Compress the body data. responseEncoding is a buffer of ResponseEncodingBufferSize bytes, which you must fill with your encoding string.
+		// If you return false, then the body is sent uncompressed.
+		virtual bool Compress(const char* acceptEncoding, const void* raw, size_t rawLen, void*& enc, size_t& encLen, char* responseEncoding) = 0;
+
+		// Free a buffer that you returned from Compress
+		virtual void Free(void* enc) = 0;
+	};
+
 #ifdef _MSC_VER
 #pragma warning(push)
 #pragma warning(disable: 28182 6308 6001)	// /analyze doesn't understand that HTTPBRIDGE_ASSERT checks for realloc failure
@@ -458,6 +472,10 @@ namespace hb
 		// Initial size of receiving buffer, per request. If this value is large, then it becomes trivial for an attacker to cause your server
 		// to exhaust all of it's memory pool, without transmitting much data. The initial buffer size is actually min(InitialBufferSize, Content-Length).
 		std::atomic<size_t>	InitialBufferSize;
+
+		// Optionally implement a response compressor. To use ICompressor, do not set the Content-Encoding header,
+		// as it will be set automatically after calling your compressor.
+		ICompressor*		Compressor = nullptr;
 
 							Backend();
 							~Backend();																// Destructor calls Close()
@@ -694,6 +712,7 @@ namespace hb
 		typedef uint32_t ByteVectorOffset;
 
 		hb::Backend*		Backend = nullptr;
+		ConstRequestPtr		Request = nullptr;
 		HttpVersion			Version = HttpVersion10;
 		uint64_t			Channel = 0;
 		uint64_t			Stream = 0;
