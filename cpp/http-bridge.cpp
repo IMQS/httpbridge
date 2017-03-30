@@ -2105,12 +2105,14 @@ namespace hb
 		void* enc = nullptr;
 		size_t encLen = -1;
 
+		const char* acceptEncoding = nullptr;
+
 		if (Request && Backend && Backend->Compressor)
 		{
 			// The following two conditions disable transparent compression:
 			// * Content-Encoding is set
 			// * Content-Length is set
-			const char* acceptEncoding = Request->HeaderByName("Accept-Encoding");
+			acceptEncoding = Request->HeaderByName("Accept-Encoding");
 			if (acceptEncoding && !HeaderByName("Content-Encoding") && !HeaderByName("Content-Length"))
 			{
 				char responseEncoding[ICompressor::ResponseEncodingBufferSize];
@@ -2135,7 +2137,7 @@ namespace hb
 		BodyLength = (uint32_t) len;
 
 		if (enc)
-			Backend->Compressor->Free(enc);
+			Backend->Compressor->Free(acceptEncoding, enc);
 	}
 
 	SendResult Response::Send()

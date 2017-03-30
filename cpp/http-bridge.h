@@ -242,7 +242,7 @@ HTTPBRIDGE_API HTTPBRIDGE_NORETURN_PREFIX void BuiltinTrap() HTTPBRIDGE_NORETURN
 		virtual bool Compress(const char* acceptEncoding, const void* raw, size_t rawLen, void*& enc, size_t& encLen, char* responseEncoding) = 0;
 
 		// Free a buffer that you returned from Compress
-		virtual void Free(void* enc) = 0;
+		virtual void Free(const char* acceptEncoding, void* enc) = 0;
 	};
 
 #ifdef _MSC_VER
