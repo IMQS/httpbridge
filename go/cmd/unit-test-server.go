@@ -44,6 +44,9 @@ func main() {
 			os.Exit(0)
 		}
 	})
-	http.ListenAndServe(httpPort, nil)
+	err := http.ListenAndServe(httpPort, nil)
+	if err != nil {
+		fmt.Printf("Error from http.ListenAndServe: %v\n", err)
+	}
 	os.Exit(0)
 }
