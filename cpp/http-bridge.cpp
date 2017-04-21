@@ -901,8 +901,18 @@ namespace hb
 	{
 		if (Request != nullptr)
 		{
-			if (!Request->BodyBuffer.IsPointerInside(BodyBytes))
+			if (BodyBytes != nullptr && !Request->BodyBuffer.IsPointerInside(BodyBytes))
+			{
+				// This is here to catch a false free that originally plagued this code. The Go code was
+				// sending us a final frame, with zero bytes of data. The flatbuffer unpack code would
+				// set BodyBytes = BodyBuffer.Data + ContentLength, so BodyBytes ended up pointing
+				// one bytes beyond BodyBuffer. That would cause IsPointerInside to fail, and then
+				// we would free data that was not actually a heap object. The flatbuffer unpack code
+				// has been changed so that BodyBytes is null when BodyBytesLen is zero, but this is an
+				// additional check to make sure that doesn't hit us again.
+				HTTPBRIDGE_ASSERT(BodyBytesLen != 0);
 				Free(BodyBytes);
+			}
 			// This is often the point at which the last reference to Request* is lost, so 
 			// Request is likely to be destroyed by this next line.
 			Request = nullptr;
@@ -1424,7 +1434,14 @@ namespace hb
 			}
 			BufferedRequestsTotalBytes += buf.Capacity - oldBufCapacity;
 			inframe.BodyBytesLen = txframe->body()->size();
-			inframe.BodyBytes = buf.Data + buf.Count - txframe->body()->size();
+			// When BodyBytesLen is zero, then it's possibly the last frame. In that case,
+			// we don't want to set BodyBytes to a pointer beyond our data, so leave it null.
+			// This was originally the source of an invalid free in inside InFrame::Reset,
+			// where it uses IsPointerInside to check if BodyBytes lies inside it's buffer.
+			// That code would falsely believe that BodyBytes was NOT inside it's buffer,
+			// when in fact it should have been treated as such.
+			if (inframe.BodyBytesLen != 0)
+				inframe.BodyBytes = buf.Data + buf.Count - txframe->body()->size();
 			return FrameStatus::OK;
 		}
 		else
