@@ -83,6 +83,7 @@ HTTPBRIDGE_API HTTPBRIDGE_NORETURN_PREFIX void BuiltinTrap() HTTPBRIDGE_NORETURN
 
 	typedef std::shared_ptr<Request>		RequestPtr;
 	typedef std::shared_ptr<const Request>	ConstRequestPtr;
+	typedef void(*RequestDestroyCallback)(Request*);
 
 	// This dword appears before every frame. It is followed by 4 bytes of frame size, and then the flatbuffer.
 	const uint32_t MagicFrameMarker = 0x48426268; // "HBbh"
@@ -591,6 +592,13 @@ namespace hb
 		HttpVersion				Version = HttpVersion10;
 		uint64_t				Channel = 0;
 		uint64_t				Stream = 0;
+
+		// You can use UserData to store any information that you want. httpbridge ignores this.
+		// If you need to be notified when a Request object is destroyed, then you can also
+		// populate OnDestroy with a function that will be called when the Request object
+		// is deleted.
+		void*					UserData = nullptr;
+		RequestDestroyCallback	OnDestroy = nullptr; // This is never touched by the httpbridge framework. Intended to be used for cleaning up UserData.
 
 		// The total length of the body of this request.
 		// If the Content-Length header is given, then this is a cache of that value.

@@ -1731,6 +1731,9 @@ namespace hb
 
 	Request::~Request()
 	{
+		if (OnDestroy)
+			OnDestroy(this);
+
 		if (Backend && IsBuffered)
 			Backend->UnregisterBufferedBytes(BodyBuffer.Capacity);
 
