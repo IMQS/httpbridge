@@ -683,8 +683,8 @@ namespace hb
 		bool			IsHeader;			// Is this the first frame of the request? For a request with an empty body, IsHeader and IsLast are both true.
 		bool			IsLast;				// Is this the last frame of the request?
 
-		uint8_t*		BodyBytes;			// Body bytes in this frame
-		size_t			BodyBytesLen;		// Length of BodyBytes
+		uint8_t*		BodyBytes;			// Body bytes in this frame, unless the frame is being buffered, in which case BodyBytes is null.
+		size_t			BodyBytesLen;		// Length of BodyBytes, unless the frame is being buffered, in which case BodyBytesLen is 0.
 
 		InFrame();
 		~InFrame();
