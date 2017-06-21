@@ -127,6 +127,7 @@ HTTPBRIDGE_API HTTPBRIDGE_NORETURN_PREFIX void BuiltinTrap() HTTPBRIDGE_NORETURN
 	enum StatusCode
 	{
 		StatusMeta_BodyPart = 1000,	// Used in a Response message to indicate that this is a body part that is being transmitted
+		StatusMeta_WillSend = 1001,	// Used to inform an HTTP dispatcher (but not httpbridge) that you will send the body out from another thread
 		Status000_NULL = 0,			// Used where a NULL value is required
 
 		Status100_Continue = 100,
