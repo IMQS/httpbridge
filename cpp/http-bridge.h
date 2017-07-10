@@ -631,7 +631,7 @@ namespace hb
 		ConstString				Query(const char* key) const;		// Returns the first URL query parameter for the given key, or NULL if none found
 		std::string				QueryStr(const char* key) const;	// Returns the first URL query parameter for the given key, or an empty string if none found
 		int64_t  				QueryInt64(const char* key) const;	// Returns the first URL query parameter for the given key, as int64, or 0 if none found
-		double  				QueryDouble(const char* key) const;	// Returns the first URL query parameter for the given key, as int64, or 0 if none found
+		double  				QueryDouble(const char* key) const;	// Returns the first URL query parameter for the given key, as double, or 0 if none found
 
 		// Use NextQuery to iterate over the query parameters.
 		// Returns zero if there are no more items.
