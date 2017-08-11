@@ -745,6 +745,7 @@ namespace hb
 		bool			IsOK() const																		{ return Status == Status200_OK; }
 		void			SetStatus(StatusCode status);
 		void			SetStatusAndBody(StatusCode status, const char* body);								// Sets the status and the body.
+		void			SetStatusAndBody(StatusCode status, const std::string& body);						// Sets the status and the body.
 		void			AddHeader(const char* key, const char* value);										// Add a header
 		void			AddHeader(int32_t keyLen, const char* key, int32_t valLen, const char* value);		// Add a header
 		void			AddHeader_ContentLength(uint64_t contentLength);									// Convenience method to add a Content-Length header

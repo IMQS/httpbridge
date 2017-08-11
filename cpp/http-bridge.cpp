@@ -2055,6 +2055,14 @@ namespace hb
 		SetBody(body, strlen(body));
 	}
 
+	void Response::SetStatusAndBody(StatusCode status, const std::string& body) {
+		// Body Part is a standalone frame. Use MakeBodyPart() or Backend.SendBodyPart().
+		HTTPBRIDGE_ASSERT(Status != StatusMeta_BodyPart);
+
+		SetStatus(status);
+		SetBody(body.c_str(), body.size());
+	}
+
 	void Response::AddHeader(const char* key, const char* value)
 	{
 		size_t keyLen = strlen(key);
