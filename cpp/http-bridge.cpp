@@ -1590,7 +1590,7 @@ namespace hb
 			else
 			{
 				if (buf[i] == '+')
-					decodedPath[j++] = buf[i];
+					decodedPath[j++] = ' ';
 				else
 					decodedPath[j++] = buf[i];
 			}
