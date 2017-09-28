@@ -771,6 +771,7 @@ namespace hb
 		void			FinishFlatbuffer(void*& buf, size_t& len, bool isLast);
 		void			SerializeToHttp(void*& buf, size_t& len);											// The returned 'buf' must be freed with hb::Free()
 		void			GetBody(const void*& buf, size_t& len) const;										// Retrieve a pointer to the Body buffer, as well as it's size
+		std::string		GetBody() const;																	// Retrieve a copy of the Body buffer.
 
 	private:
 		flatbuffers::FlatBufferBuilder*		FBB = nullptr;

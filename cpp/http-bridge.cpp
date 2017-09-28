@@ -2273,11 +2273,6 @@ namespace hb
 
 	void Response::SerializeToHttp(void*& buf, size_t& len)
 	{
-		// This doesn't make any sense. Additionally, we need the guarantee that our
-		// Body is always FBB->GetBufferPointer() + 4, because we're reaching into the
-		// FBB internals here.
-		HTTPBRIDGE_ASSERT(!IsFlatBufferBuilt);
-
 		if (HeaderByName(Header_Content_Length) == nullptr)
 		{
 			char s[11]; // 10 characters needed for 4294967295
@@ -2334,8 +2329,10 @@ namespace hb
 		BufWrite(out, CRLF, 2);
 
 		// Write body
-		uint8_t* flatbuf = FBB->GetBufferPointer();
-		BufWrite(out, flatbuf + 4, BodyLength);
+		const void* bodyBuf = nullptr;
+		size_t bodyLen = 0;
+		GetBody(bodyBuf, bodyLen);
+		BufWrite(out, bodyBuf, bodyLen);
 	}
 
 	void Response::GetBody(const void*& buf, size_t& len) const
@@ -2347,8 +2344,19 @@ namespace hb
 		}
 		else
 		{
-			buf = FBB->GetBufferPointer() + BodyOffset;
+			// The flatbuffer buffer grows downward, and GetCurrentBufferPointer() returns the low point.
+			// So we add back the FBB size to get to the starting high point, and then subtract our BodyOffset,
+			// then add 4, to get our body pointer. I don't know where the 4 comes from.
+			buf = FBB->GetCurrentBufferPointer() + FBB->GetSize() - BodyOffset + 4;
 		}
+	}
+
+	std::string Response::GetBody() const
+	{
+		const void* buf = nullptr;
+		size_t len = 0;
+		GetBody(buf, len);
+		return std::string((const char*) buf, len);
 	}
 
 	void Response::Free()
