@@ -268,8 +268,23 @@ void TestUtilFunctions()
 	assert( hb::uatoi64("123456789012345", 15) == 123456789012345ull);
 }
 
+void TestMockedRequest()
+{
+	auto r = hb::Request::CreateMocked("GET", "/foo/bar?a=b", {{"Allow", "Nothing"}}, "boddy");
+	assert(r->Method() == "GET");
+	assert(r->URI() == "/foo/bar?a=b");
+	assert(r->Path() == "/foo/bar");
+	assert(r->HeaderCount() == 1);
+	assert(strcmp(r->HeaderByName("Allow"), "Nothing") == 0);
+	assert(r->QueryStr("a") == "b");
+	assert(r->IsBuffered);
+	assert(r->BodyBuffer.Count == 5);
+	assert(memcmp(r->BodyBuffer.Data, "boddy", 5) == 0);
+}
+
 int main(int argc, char** argv)
 {
+	run(TestMockedRequest);
 	run(TestUrlQueryParser);
 	run(TestRequestQuerySplitter);
 	run(TestResponseMisc);

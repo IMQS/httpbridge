@@ -1744,6 +1744,43 @@ namespace hb
 			ContentLength = (uint64_t) atoi64(contentLength);
 	}
 
+	RequestPtr Request::CreateMocked(const std::string& method, const std::string& uri, const std::unordered_map<std::string, std::string>& headers, const std::string& body)
+	{
+		std::string hbContent;
+		std::vector<HeaderLine> lines;
+		size_t kvSize = sizeof(HeaderLine) * (2 + headers.size());
+		auto append = [&](const std::string& key, const std::string& val)
+		{
+			HeaderLine line;
+			line.KeyStart = (uint32_t) (kvSize + hbContent.size());
+			line.KeyLen = (uint32_t) key.size();
+			hbContent += key;
+			hbContent.append(1, (char) 0);
+			hbContent += val;
+			hbContent.append(1, (char) 0);
+			lines.push_back(line);
+		};
+		append(method, uri);
+		for (auto& h : headers)
+			append(h.first, h.second);
+
+		// add a terminal line
+		append("", "");
+
+		// merge lines + hbContent into one block of memory
+		char* hb = (char*) Alloc((uint32_t) kvSize + hbContent.size(), nullptr);
+		memcpy(hb, &lines[0], kvSize);
+		memcpy(hb + kvSize, hbContent.c_str(), hbContent.size());
+
+		auto r = std::make_shared<Request>();
+		r->Initialize(nullptr, HttpVersion11, 0, 0, (int32_t) lines.size() - 1, hb);
+		r->ParseURI();
+		r->IsBuffered = true;
+		if (body.size() != 0)
+			r->BodyBuffer.Write(body.c_str(), body.size());
+		return r;
+	}
+
 	StreamState Request::State() const
 	{
 		return _State;

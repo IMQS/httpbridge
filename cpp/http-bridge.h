@@ -616,6 +616,9 @@ namespace hb
 		// Set a header. The Request object now owns headerBlock, and will Free() it in the destructor
 		// The header block must have a terminal pair inside in order to make iteration easy.
 		void					Initialize(hb::Backend* backend, HttpVersion version, uint64_t channel, uint64_t stream, int32_t headerCount, const void* headerBlock);
+
+		// Create a mocked request object, to use in tests
+		static RequestPtr		CreateMocked(const std::string& method, const std::string& uri, const std::unordered_map<std::string, std::string>& headers, const std::string& body = "");
 		
 		StreamState				State() const;								// If State is not Active, then you shouldn't be sending any frames
 		void					SetState(StreamState newState);				// Atomically set the state, but once in Aborted state, always stay Aborted.
