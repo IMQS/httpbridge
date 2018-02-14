@@ -620,7 +620,7 @@ namespace hb
 			else
 			{
 				const char* proto = it->ai_family == PF_INET6 ? "IPv6" : "IP4";
-				Log->Logf("Unable to connect (%s): %d", proto, (int) LastError());
+				Log->Logf("Unable to connect (%s %s): %d", proto, addr, (int) LastError());
 				Close();
 			}
 		}
