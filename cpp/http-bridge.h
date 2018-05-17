@@ -1,3 +1,4 @@
+// clang-format off
 #pragma once
 #ifndef HTTPBRIDGE_INCLUDED
 #define HTTPBRIDGE_INCLUDED
@@ -791,7 +792,7 @@ namespace hb
 		void	CreateBuilder();
 		int32_t	HeaderKeyLen(int32_t i) const;
 		int32_t	HeaderValueLen(int32_t i) const;
-		void	SetBodyInternal(const void* body, size_t len);
+		void	SetBodyInternal(const void* body, size_t len, bool isFullBody);
 	};
 }
 

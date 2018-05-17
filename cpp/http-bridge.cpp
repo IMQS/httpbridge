@@ -1,3 +1,4 @@
+// clang-format off
 #include "http-bridge.h"
 #include "http-bridge_generated.h"
 #include <string>
@@ -2064,7 +2065,7 @@ namespace hb
 	Response Response::MakeBodyPart(ConstRequestPtr request, const void* part, size_t len, bool isFinal)
 	{
 		Response r(request);
-		r.SetBodyInternal(part, len);
+		r.SetBodyInternal(part, len, false);
 		r.Status = StatusMeta_BodyPart;
 		r.IsFinalChunkedFrame = isFinal;
 		return r;
@@ -2144,10 +2145,10 @@ namespace hb
 		// Use MakeBodyPart()
 		HTTPBRIDGE_ASSERT(Status != StatusMeta_BodyPart);
 
-		SetBodyInternal(body, len);
+		SetBodyInternal(body, len, true);
 	}
 
-	void Response::SetBodyInternal(const void* body, size_t len)
+	void Response::SetBodyInternal(const void* body, size_t len, bool isFullBody)
 	{
 		// Ensure sanity, as well as safety because BodyLength is uint32
 		HTTPBRIDGE_ASSERT(len <= 1024 * 1024 * 1024);
@@ -2162,7 +2163,7 @@ namespace hb
 
 		const char* acceptEncoding = nullptr;
 
-		if (Request && Backend && Backend->Compressor)
+		if (isFullBody && Request && Backend && Backend->Compressor)
 		{
 			// The following two conditions disable transparent compression:
 			// * Content-Encoding is set
