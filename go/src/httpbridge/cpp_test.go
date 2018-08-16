@@ -74,7 +74,7 @@ func setup() error {
 // process tear-down
 func teardown() {
 	kill_cpp(nil, true)
-	//kill_front()
+	kill_front()
 }
 
 func kill_cpp(t *testing.T, kill_external_backend bool) {
@@ -128,7 +128,7 @@ func kill_cpp(t *testing.T, kill_external_backend bool) {
 
 func restart(t *testing.T) {
 	//kill_front()
-	kill_cpp(t, false)
+	//kill_cpp(t, false)
 
 	// Launch HTTP server (front-end).
 	// I can't figure out how to properly terminate the net/http serving infrastructure, so we just
@@ -428,6 +428,11 @@ func TestTooLongURI(t *testing.T) {
 	restart(t)
 	url := "/" + generateBuf(65537)
 	testGet(t, url, 414, "")
+}
+func TestURI(t *testing.T) {
+	restart(t)
+	testGet(t, "/echo-path/hello", 200, "/echo-path/hello")
+	testGet(t, "/echo-path/hello%20%25!", 200, "/echo-path/hello %!")
 }
 
 func TestServerOutOfMemory_Early(t *testing.T) {

@@ -104,6 +104,14 @@ public:
 				StreamOutQueueLock.unlock();
 			}
 		}
+		else if (prefix_match("/echo-path"))
+		{
+			std::string path = inframe.Request->Path();
+			hb::Response r(inframe.Request);
+			r.AddHeader_ContentLength(path.size());
+			r.SetBody(path.c_str(), path.size());
+			r.Send();
+		}
 		else if (prefix_match("/echo"))
 		{
 			HttpEcho(inframe, lr);
