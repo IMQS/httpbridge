@@ -1,3 +1,4 @@
+// clang-format off
 #pragma once
 #ifndef HTTPBRIDGE_INCLUDED
 #define HTTPBRIDGE_INCLUDED
@@ -127,6 +128,7 @@ HTTPBRIDGE_API HTTPBRIDGE_NORETURN_PREFIX void BuiltinTrap() HTTPBRIDGE_NORETURN
 	enum StatusCode
 	{
 		StatusMeta_BodyPart = 1000,	// Used in a Response message to indicate that this is a body part that is being transmitted
+		StatusMeta_WillSend = 1001,	// Used to inform an HTTP dispatcher (but not httpbridge) that you will send the body out from another thread
 		Status000_NULL = 0,			// Used where a NULL value is required
 
 		Status100_Continue = 100,
@@ -615,6 +617,9 @@ namespace hb
 		// Set a header. The Request object now owns headerBlock, and will Free() it in the destructor
 		// The header block must have a terminal pair inside in order to make iteration easy.
 		void					Initialize(hb::Backend* backend, HttpVersion version, uint64_t channel, uint64_t stream, int32_t headerCount, const void* headerBlock);
+
+		// Create a mocked request object, to use in tests
+		static RequestPtr		CreateMocked(const std::string& method, const std::string& uri, const std::unordered_map<std::string, std::string>& headers, const std::string& body = "");
 		
 		StreamState				State() const;								// If State is not Active, then you shouldn't be sending any frames
 		void					SetState(StreamState newState);				// Atomically set the state, but once in Aborted state, always stay Aborted.
@@ -630,7 +635,7 @@ namespace hb
 		ConstString				Query(const char* key) const;		// Returns the first URL query parameter for the given key, or NULL if none found
 		std::string				QueryStr(const char* key) const;	// Returns the first URL query parameter for the given key, or an empty string if none found
 		int64_t  				QueryInt64(const char* key) const;	// Returns the first URL query parameter for the given key, as int64, or 0 if none found
-		double  				QueryDouble(const char* key) const;	// Returns the first URL query parameter for the given key, as int64, or 0 if none found
+		double  				QueryDouble(const char* key) const;	// Returns the first URL query parameter for the given key, as double, or 0 if none found
 
 		// Use NextQuery to iterate over the query parameters.
 		// Returns zero if there are no more items.
@@ -683,8 +688,8 @@ namespace hb
 		bool			IsHeader;			// Is this the first frame of the request? For a request with an empty body, IsHeader and IsLast are both true.
 		bool			IsLast;				// Is this the last frame of the request?
 
-		uint8_t*		BodyBytes;			// Body bytes in this frame
-		size_t			BodyBytesLen;		// Length of BodyBytes
+		uint8_t*		BodyBytes;			// Body bytes in this frame, unless the frame is being buffered, in which case BodyBytes is null.
+		size_t			BodyBytesLen;		// Length of BodyBytes, unless the frame is being buffered, in which case BodyBytesLen is 0.
 
 		InFrame();
 		~InFrame();
@@ -744,6 +749,7 @@ namespace hb
 		bool			IsOK() const																		{ return Status == Status200_OK; }
 		void			SetStatus(StatusCode status);
 		void			SetStatusAndBody(StatusCode status, const char* body);								// Sets the status and the body.
+		void			SetStatusAndBody(StatusCode status, const std::string& body);						// Sets the status and the body.
 		void			AddHeader(const char* key, const char* value);										// Add a header
 		void			AddHeader(int32_t keyLen, const char* key, int32_t valLen, const char* value);		// Add a header
 		void			AddHeader_ContentLength(uint64_t contentLength);									// Convenience method to add a Content-Length header
@@ -769,6 +775,7 @@ namespace hb
 		void			FinishFlatbuffer(void*& buf, size_t& len, bool isLast);
 		void			SerializeToHttp(void*& buf, size_t& len);											// The returned 'buf' must be freed with hb::Free()
 		void			GetBody(const void*& buf, size_t& len) const;										// Retrieve a pointer to the Body buffer, as well as it's size
+		std::string		GetBody() const;																	// Retrieve a copy of the Body buffer.
 
 	private:
 		flatbuffers::FlatBufferBuilder*		FBB = nullptr;
@@ -785,7 +792,7 @@ namespace hb
 		void	CreateBuilder();
 		int32_t	HeaderKeyLen(int32_t i) const;
 		int32_t	HeaderValueLen(int32_t i) const;
-		void	SetBodyInternal(const void* body, size_t len);
+		void	SetBodyInternal(const void* body, size_t len, bool isFullBody);
 	};
 }
 

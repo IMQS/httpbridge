@@ -109,12 +109,12 @@ Build {
 		Config {
 			Name = "win32-msvc",
 			SupportedHosts = { "windows" },
-			Tools = { { "msvc-vs2013"; TargetArch = "x86" } },
+			Tools = { { "msvc-vs2015"; TargetArch = "x86" } },
 		},
 		Config {
 			Name = "win64-msvc",
 			DefaultOnHost = "windows",
-			Tools = { { "msvc-vs2013"; TargetArch = "x64" } },
+			Tools = { { "msvc-vs2015"; TargetArch = "x64" } },
 		},
 	},
 
@@ -137,7 +137,7 @@ Build {
 		},
 
 		-- Override output directory for sln/vcxproj files.
-		MsvcSolutionDir = 'vs2013',
+		MsvcSolutionDir = 'vs2015',
 
 	    BuildAllByDefault = true,
 	}

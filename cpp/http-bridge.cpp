@@ -1,3 +1,4 @@
+// clang-format off
 #include "http-bridge.h"
 #include "http-bridge_generated.h"
 #include <string>
@@ -620,7 +621,7 @@ namespace hb
 			else
 			{
 				const char* proto = it->ai_family == PF_INET6 ? "IPv6" : "IP4";
-				Log->Logf("Unable to connect (%s): %d", proto, (int) LastError());
+				Log->Logf("Unable to connect (%s %s): %d", proto, addr, (int) LastError());
 				Close();
 			}
 		}
@@ -889,6 +890,7 @@ namespace hb
 	InFrame::InFrame()
 	{
 		Request = nullptr;
+		BodyBytes = nullptr;
 		Reset();
 	}
 
@@ -901,21 +903,15 @@ namespace hb
 	{
 		if (Request != nullptr)
 		{
-			if (BodyBytes != nullptr && !Request->BodyBuffer.IsPointerInside(BodyBytes))
-			{
-				// This is here to catch a false free that originally plagued this code. The Go code was
-				// sending us a final frame, with zero bytes of data. The flatbuffer unpack code would
-				// set BodyBytes = BodyBuffer.Data + ContentLength, so BodyBytes ended up pointing
-				// one bytes beyond BodyBuffer. That would cause IsPointerInside to fail, and then
-				// we would free data that was not actually a heap object. The flatbuffer unpack code
-				// has been changed so that BodyBytes is null when BodyBytesLen is zero, but this is an
-				// additional check to make sure that doesn't hit us again.
-				HTTPBRIDGE_ASSERT(BodyBytesLen != 0);
-				Free(BodyBytes);
-			}
 			// This is often the point at which the last reference to Request* is lost, so 
 			// Request is likely to be destroyed by this next line.
 			Request = nullptr;
+		}
+
+		if (BodyBytes)
+		{
+			HTTPBRIDGE_ASSERT(BodyBytesLen != 0);
+			Free(BodyBytes);
 		}
 
 		Type = FrameType::Data;
@@ -1154,6 +1150,8 @@ namespace hb
 		if (!frame.IsHeader || frame.IsLast || request->ContentLength == 0 || request->ContentLength == -1)
 			LogAndPanic("ResendWhenBodyIsDone may only be called on the first frame of a request (the header frame), with a positive body length");
 
+		// Although it is tempting to allocate all the buffer memory up-front, to reduce memory getting
+		// copied around upon buffer resizing, it's probably not worth the memory cost.
 		size_t initialSize = min(InitialBufferSize.load(), (size_t) request->ContentLength);
 		initialSize = max(initialSize, frame.BodyBytesLen);
 		initialSize = max(initialSize, (size_t) 16);
@@ -1177,7 +1175,8 @@ namespace hb
 		request->BodyBuffer.Count = frame.BodyBytesLen;
 		request->BodyBuffer.Capacity = initialSize;
 		Free(frame.BodyBytes);
-		frame.BodyBytes = request->BodyBuffer.Data;
+		frame.BodyBytes = nullptr;
+		frame.BodyBytesLen = 0;
 
 		BufferedRequestsTotalBytes += (size_t) request->BodyBuffer.Capacity;
 
@@ -1433,15 +1432,7 @@ namespace hb
 				return FrameStatus::OutOfMemory;
 			}
 			BufferedRequestsTotalBytes += buf.Capacity - oldBufCapacity;
-			inframe.BodyBytesLen = txframe->body()->size();
-			// When BodyBytesLen is zero, then it's possibly the last frame. In that case,
-			// we don't want to set BodyBytes to a pointer beyond our data, so leave it null.
-			// This was originally the source of an invalid free in inside InFrame::Reset,
-			// where it uses IsPointerInside to check if BodyBytes lies inside it's buffer.
-			// That code would falsely believe that BodyBytes was NOT inside it's buffer,
-			// when in fact it should have been treated as such.
-			if (inframe.BodyBytesLen != 0)
-				inframe.BodyBytes = buf.Data + buf.Count - txframe->body()->size();
+			// When buffering, just leave BodyBytes null, and BodyBytesLen zero. See comment in notes.md, from 2017-05-18
 			return FrameStatus::OK;
 		}
 		else
@@ -1600,7 +1591,7 @@ namespace hb
 			else
 			{
 				if (buf[i] == '+')
-					decodedPath[j++] = buf[i];
+					decodedPath[j++] = ' ';
 				else
 					decodedPath[j++] = buf[i];
 			}
@@ -1752,6 +1743,43 @@ namespace hb
 		const char* contentLength = HeaderByName(Header_Content_Length);
 		if (contentLength != nullptr)
 			ContentLength = (uint64_t) atoi64(contentLength);
+	}
+
+	RequestPtr Request::CreateMocked(const std::string& method, const std::string& uri, const std::unordered_map<std::string, std::string>& headers, const std::string& body)
+	{
+		std::string hbContent;
+		std::vector<HeaderLine> lines;
+		size_t kvSize = sizeof(HeaderLine) * (2 + headers.size());
+		auto append = [&](const std::string& key, const std::string& val)
+		{
+			HeaderLine line;
+			line.KeyStart = (uint32_t) (kvSize + hbContent.size());
+			line.KeyLen = (uint32_t) key.size();
+			hbContent += key;
+			hbContent.append(1, (char) 0);
+			hbContent += val;
+			hbContent.append(1, (char) 0);
+			lines.push_back(line);
+		};
+		append(method, uri);
+		for (auto& h : headers)
+			append(h.first, h.second);
+
+		// add a terminal line
+		append("", "");
+
+		// merge lines + hbContent into one block of memory
+		char* hb = (char*) Alloc((uint32_t) kvSize + hbContent.size(), nullptr);
+		memcpy(hb, &lines[0], kvSize);
+		memcpy(hb + kvSize, hbContent.c_str(), hbContent.size());
+
+		auto r = std::make_shared<Request>();
+		r->Initialize(nullptr, HttpVersion11, 0, 0, (int32_t) lines.size() - 1, hb);
+		r->ParseURI();
+		r->IsBuffered = true;
+		if (body.size() != 0)
+			r->BodyBuffer.Write(body.c_str(), body.size());
+		return r;
 	}
 
 	StreamState Request::State() const
@@ -2037,7 +2065,7 @@ namespace hb
 	Response Response::MakeBodyPart(ConstRequestPtr request, const void* part, size_t len, bool isFinal)
 	{
 		Response r(request);
-		r.SetBodyInternal(part, len);
+		r.SetBodyInternal(part, len, false);
 		r.Status = StatusMeta_BodyPart;
 		r.IsFinalChunkedFrame = isFinal;
 		return r;
@@ -2063,6 +2091,14 @@ namespace hb
 
 		SetStatus(status);
 		SetBody(body, strlen(body));
+	}
+
+	void Response::SetStatusAndBody(StatusCode status, const std::string& body) {
+		// Body Part is a standalone frame. Use MakeBodyPart() or Backend.SendBodyPart().
+		HTTPBRIDGE_ASSERT(Status != StatusMeta_BodyPart);
+
+		SetStatus(status);
+		SetBody(body.c_str(), body.size());
 	}
 
 	void Response::AddHeader(const char* key, const char* value)
@@ -2109,10 +2145,10 @@ namespace hb
 		// Use MakeBodyPart()
 		HTTPBRIDGE_ASSERT(Status != StatusMeta_BodyPart);
 
-		SetBodyInternal(body, len);
+		SetBodyInternal(body, len, true);
 	}
 
-	void Response::SetBodyInternal(const void* body, size_t len)
+	void Response::SetBodyInternal(const void* body, size_t len, bool isFullBody)
 	{
 		// Ensure sanity, as well as safety because BodyLength is uint32
 		HTTPBRIDGE_ASSERT(len <= 1024 * 1024 * 1024);
@@ -2127,7 +2163,7 @@ namespace hb
 
 		const char* acceptEncoding = nullptr;
 
-		if (Request && Backend && Backend->Compressor)
+		if (isFullBody && Request && Backend && Backend->Compressor)
 		{
 			// The following two conditions disable transparent compression:
 			// * Content-Encoding is set
@@ -2275,11 +2311,6 @@ namespace hb
 
 	void Response::SerializeToHttp(void*& buf, size_t& len)
 	{
-		// This doesn't make any sense. Additionally, we need the guarantee that our
-		// Body is always FBB->GetBufferPointer() + 4, because we're reaching into the
-		// FBB internals here.
-		HTTPBRIDGE_ASSERT(!IsFlatBufferBuilt);
-
 		if (HeaderByName(Header_Content_Length) == nullptr)
 		{
 			char s[11]; // 10 characters needed for 4294967295
@@ -2336,8 +2367,10 @@ namespace hb
 		BufWrite(out, CRLF, 2);
 
 		// Write body
-		uint8_t* flatbuf = FBB->GetBufferPointer();
-		BufWrite(out, flatbuf + 4, BodyLength);
+		const void* bodyBuf = nullptr;
+		size_t bodyLen = 0;
+		GetBody(bodyBuf, bodyLen);
+		BufWrite(out, bodyBuf, bodyLen);
 	}
 
 	void Response::GetBody(const void*& buf, size_t& len) const
@@ -2349,8 +2382,19 @@ namespace hb
 		}
 		else
 		{
-			buf = FBB->GetBufferPointer() + BodyOffset;
+			// The flatbuffer buffer grows downward, and GetCurrentBufferPointer() returns the low point.
+			// So we add back the FBB size to get to the starting high point, and then subtract our BodyOffset,
+			// then add 4, to get our body pointer. I don't know where the 4 comes from.
+			buf = FBB->GetCurrentBufferPointer() + FBB->GetSize() - BodyOffset + 4;
 		}
+	}
+
+	std::string Response::GetBody() const
+	{
+		const void* buf = nullptr;
+		size_t len = 0;
+		GetBody(buf, len);
+		return std::string((const char*) buf, len);
 	}
 
 	void Response::Free()
