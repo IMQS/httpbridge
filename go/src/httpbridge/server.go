@@ -176,21 +176,24 @@ func (s *Server) ListenAndServe() error {
 	if s.backendListener, err = net.Listen("tcp", backendPort); err != nil {
 		return err
 	}
-	done := make(chan bool)
+	errPipe := make(chan error)
+	defer close(errPipe)
 	if enableHTTPListener {
 		go func() {
-			s.httpServer.Serve(s.httpListener)
-			done <- true
+			errPipe <- s.httpServer.Serve(s.httpListener)
 		}()
 	}
 	go func() {
-		s.AcceptBackendConnections()
-		done <- true
+		errPipe <- s.AcceptBackendConnections()
 	}()
-	if enableHTTPListener {
-		<-done // wait for HTTP accepter to finish
+
+	for err := range errPipe {
+		// loop does blocking read on channel and will only exit after non-nil error is received
+		if err != nil {
+			return err
+		}
 	}
-	<-done // wait for Backend accepter to finish
+	// unreachable
 	return nil
 }
 
@@ -576,12 +579,12 @@ func (s *Server) sendResponseFrame(w http.ResponseWriter, req *http.Request, bac
 	return nil
 }
 
-func (s *Server) AcceptBackendConnections() {
+func (s *Server) AcceptBackendConnections() error {
 	for {
 		con, err := s.backendListener.Accept()
 		if err != nil {
 			s.Log.Errorf("Error in HttpBridge Connection Accept: %v", err)
-			break
+			return err
 		}
 		backend := &backendConnection{
 			con:            con,
