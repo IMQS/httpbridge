@@ -347,6 +347,14 @@ namespace hb
 		return v;
 	}
 
+	bool EqNoCase(const char* a, const char* b, size_t len) {
+		for (size_t i = 0; i < len; i++) {
+			if (tolower(a[i]) != tolower(b[i]))
+				return false;
+		}
+		return true;
+	}
+
 #ifdef HTTPBRIDGE_PLATFORM_WINDOWS
 	void SleepNano(int64_t nanoseconds)
 	{
@@ -1893,7 +1901,7 @@ namespace hb
 		for (int32_t i = NumPseudoHeaderLines; i < count; i++)
 		{
 			const uint8_t* bKey = _HeaderBlock + lines[i].KeyStart;
-			if (memcmp(bKey, name, nameLen) == 0)
+			if (EqNoCase((const char*) bKey, name, nameLen))
 				nth--;
 
 			if (nth == -1)
